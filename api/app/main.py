@@ -9,6 +9,13 @@ from supabase import create_client
 app = FastAPI(title="GurukulAI Backend", version="1.0.0")
 
 # CORS (keep permissive for demo; tighten later)
+@app.get("/storage/debug-list")
+def storage_debug_list():
+    bucket = os.getenv("SUPABASE_PRIVATE_BUCKET", "gurukulai-private")
+    folder = "ICSE/6/Biology/Chapter-01-The-Leaf"
+    res = supabase.storage.from_(bucket).list(folder)
+    return {"bucket": bucket, "folder": folder, "items": res}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
