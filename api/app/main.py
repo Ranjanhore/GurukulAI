@@ -2,6 +2,23 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
+from fastapi.middleware.cors import CORSMiddleware
+
+ALLOWED_ORIGINS = [
+    "https://lovable.dev",
+    "https://*.lovable.app",
+    "https://*.lovableproject.com",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,   # or ["*"] for now
+    allow_credentials=False,         # keep False if you use "*" origin
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ... your existing app + supabase client init above this ...
 
