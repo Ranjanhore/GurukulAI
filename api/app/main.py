@@ -1,112 +1,103 @@
-import os
-from typing import Dict, List, Optional
-
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from supabase import create_client
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+import os
 
-app = FastAPI(title="GurukulAI Backend", version="1.0.0")
-
-# CORS (keep permissive for demo; tighten later)
-@app.get("/storage/debug-list")
-def storage_debug_list():
-    bucket = os.getenv("SUPABASE_PRIVATE_BUCKET", "gurukulai-private")
-    folder = "ICSE/6/Biology/Chapter-01-The-Leaf"
-    res = supabase.storage.from_(bucket).list(folder)
-    return {"bucket": bucket, "folder": folder, "items": res}
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-SUPABASE_PRIVATE_BUCKET = os.getenv("SUPABASE_PRIVATE_BUCKET", "gurukulai-private").strip()
-
-supabase = None
-if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
-
-def require_supabase():
-    if supabase is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Railway Variables.",
-        )
-    return supabase
-
+# ... your existing app + supabase client init above this ...
 
 class SignOneRequest(BaseModel):
-    bucket: Optional[str] = None
+    bucket: str
     path: str
-    expires_in: int = Field(default=3600, ge=60, le=86400)
-
+    expires_in: int = 3600
 
 class SignBatchRequest(BaseModel):
-    bucket: Optional[str] = None
-    paths: List[str] = Field(..., min_length=1)
-    expires_in: int = Field(default=3600, ge=60, le=86400)
+    bucket: str
+    paths: List[str]
+    expires_in: int = 3600
 
+def _extract_signed_url(resp: Any) -> Optional[str]:
+    """
+    supabase-py has changed response shapes across versions.
+    This safely extracts the signed URL no matter the key casing/shape.
+    """
+    if not resp:
+        return None
+    if isinstance(resp, str):
+        return resp
 
-@app.get("/")
-def root():
-    return {"message": "GurukulAI backend running"}
+    # common dict keys across versions
+    if isinstance(resp, dict):
+        for key in ["signedURL", "signedUrl", "signed_url", "url", "URL"]:
+            if key in resp and resp[key]:
+                return resp[key]
 
+        # sometimes nested
+        data = resp.get("data")
+        if isinstance(data, dict):
+            for key in ["signedURL", "signedUrl", "signed_url", "url", "URL"]:
+                if key in data and data[key]:
+                    return data[key]
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "supabase_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY),
-        "private_bucket": SUPABASE_PRIVATE_BUCKET,
-    }
-
+    return None
 
 @app.post("/storage/sign")
 def storage_sign(req: SignOneRequest):
-    sb = require_supabase()
-    bucket = (req.bucket or SUPABASE_PRIVATE_BUCKET).strip()
-    if not bucket:
-        raise HTTPException(status_code=400, detail="Bucket missing")
-
-    res = sb.storage.from_(bucket).create_signed_url(req.path, req.expires_in)
-    data = getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None) or {}
-
-    signed = data.get("signedURL") or data.get("signedUrl")
-    if not signed:
-        raise HTTPException(status_code=404, detail="Could not create signed URL. Check bucket/path.")
-    return {"bucket": bucket, "expires_in": req.expires_in, "path": req.path, "signed_url": signed}
-
+    try:
+        res = supabase.storage.from_(req.bucket).create_signed_url(req.path, req.expires_in)
+        signed = _extract_signed_url(res)
+        if not signed:
+            raise HTTPException(status_code=404, detail=f"Could not create signed URL. Check bucket/path. resp={res}")
+        return {"signed_url": signed, "bucket": req.bucket, "path": req.path, "expires_in": req.expires_in}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/storage/sign-batch")
 def storage_sign_batch(req: SignBatchRequest):
-    sb = require_supabase()
-    bucket = (req.bucket or SUPABASE_PRIVATE_BUCKET).strip()
-    if not bucket:
-        raise HTTPException(status_code=400, detail="Bucket missing")
+    try:
+        # Some versions support create_signed_urls, some don't.
+        fn = getattr(supabase.storage.from_(req.bucket), "create_signed_urls", None)
 
-    signed_urls: Dict[str, str] = {}
-    errors: Dict[str, str] = {}
+        results: Dict[str, str] = {}
+        errors: Dict[str, str] = {}
 
-    for p in req.paths:
-        try:
-            res = sb.storage.from_(bucket).create_signed_url(p, req.expires_in)
-            data = getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None) or {}
-            signed = data.get("signedURL") or data.get("signedUrl")
-            if signed:
-                signed_urls[p] = signed
+        if callable(fn):
+            res = fn(req.paths, req.expires_in)
+
+            # res could be list[dict] or dict
+            if isinstance(res, list):
+                for i, item in enumerate(res):
+                    path = req.paths[i] if i < len(req.paths) else f"idx:{i}"
+                    url = _extract_signed_url(item)
+                    if url:
+                        results[path] = url
+                    else:
+                        errors[path] = f"No signed url returned. resp={item}"
             else:
-                errors[p] = "No signed url returned"
-        except Exception as e:
-            errors[p] = str(e)
+                # fall back to per-path if unexpected shape
+                for path in req.paths:
+                    one = supabase.storage.from_(req.bucket).create_signed_url(path, req.expires_in)
+                    url = _extract_signed_url(one)
+                    if url:
+                        results[path] = url
+                    else:
+                        errors[path] = f"No signed url returned. resp={one}"
+        else:
+            # safest fallback: sign one-by-one
+            for path in req.paths:
+                one = supabase.storage.from_(req.bucket).create_signed_url(path, req.expires_in)
+                url = _extract_signed_url(one)
+                if url:
+                    results[path] = url
+                else:
+                    errors[path] = f"No signed url returned. resp={one}"
 
-    if not signed_urls:
-        raise HTTPException(status_code=404, detail={"message": "No signed URLs created", "errors": errors})
+        if not results:
+            raise HTTPException(status_code=404, detail={"message": "No signed URLs created", "errors": errors})
 
-    return {"bucket": bucket, "expires_in": req.expires_in, "signed_urls": signed_urls, "errors": errors}
+        return {"signed_urls": results, "errors": errors}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
