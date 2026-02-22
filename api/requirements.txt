@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+openai
+supabase
+python-multipart
+pydantic
