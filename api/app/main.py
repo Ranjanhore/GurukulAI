@@ -6,16 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 ALLOWED_ORIGINS = [
     "https://lovable.dev",
-    "https://*.lovable.app",
-    "https://*.lovableproject.com",
+    "https://leaf-lore-chapters-story.lovable.app",  # <-- your actual lovable app URL
     "http://localhost:5173",
     "http://localhost:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,   # or ["*"] for now
-    allow_credentials=False,         # keep False if you use "*" origin
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
