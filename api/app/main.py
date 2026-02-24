@@ -49,10 +49,7 @@ class VideoResponse(BaseModel):
 
 @app.get("/")
 def root():
-    return {
-        "status": "ok",
-        "message": "GurukulAI backend running"
-    }
+    return {"status": "ok"}
 
 
 @app.get("/health")
