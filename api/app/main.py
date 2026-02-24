@@ -31,7 +31,7 @@ class VideoResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "1.0.2"}
+    return {"status": "healthy", "build": "v1.0.2"}
 
 @app.post("/video-url", response_model=VideoResponse)
 def get_video_url(data: VideoRequest):
