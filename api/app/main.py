@@ -50,13 +50,11 @@ class VideoResponse(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "GurukulAI Backend"}
-
+    return {"status": "ok"}
 
 @app.get("/health")
 def health():
     return {"status": "healthy"}
-
 
 @app.post("/video-url", response_model=VideoResponse)
 def get_video_url(data: VideoRequest):
