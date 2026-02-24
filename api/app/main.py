@@ -3,6 +3,26 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import os
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# 1️⃣ Create app FIRST
+app = FastAPI()
+
+# 2️⃣ Then add middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # use * for now
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 3️⃣ Then define routes
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
 
 ALLOWED_ORIGINS = [
     "https://lovable.dev",
@@ -10,14 +30,6 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
 ]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # ... your existing app + supabase client init above this ...
 
