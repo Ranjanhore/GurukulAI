@@ -2,18 +2,17 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from supabase import create_client, Client
+from urllib.parse import quote
 
-SUPABASE_URL = os.getenv("https://zvfebuoasoomeanevcjz.supabase.co
-")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2ZmVidW9hc29vbWVhbmV2Y2p6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTc2MDk4NywiZXhwIjoyMDg3MzM2OTg3fQ.0PVdqzFVVp563wq5A4L30M44H4yJGGlm2YoCrQ3E8fY")
+SUPABASE_URL = os.getenv("https://zvfebuoasoomeanevcjz.supabase.co")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp2ZmVidW9hc29vbWVhbmV2Y2p6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTc2MDk4NywiZXhwIjoyMDg3MzM2OTg3fQ.0PVdqzFVVp563wq5A4L30M44H4yJGGlm2YoCrQ3E8fY")  # kept for future use
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise Exception("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set.")
+if not SUPABASE_URL:
+    raise Exception("SUPABASE_URL not set in environment variables.")
+if not SUPABASE_SERVICE_ROLE_KEY:
+    raise Exception("SUPABASE_SERVICE_ROLE_KEY not set in environment variables.")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
-app = FastAPI(title="GurukulAI Backend", version="1.0.1")  # bump version
+app = FastAPI(title="GurukulAI Backend", version="1.0.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,19 +36,16 @@ def health():
 @app.post("/video-url", response_model=VideoResponse)
 def get_video_url(data: VideoRequest):
     try:
-        result = supabase.storage.from_(data.bucket).get_public_url(data.path)
+        bucket = data.bucket.strip()
+        path = data.path.strip().lstrip("/")
 
-        # handle both possible return shapes
-        if isinstance(result, str):
-            public_url = result
-        elif isinstance(result, dict):
-            public_url = result.get("publicUrl") or result.get("public_url")
-        else:
-            public_url = None
+        if not bucket or not path:
+            raise HTTPException(status_code=400, detail="bucket and path are required.")
 
-        if not public_url:
-            raise HTTPException(status_code=404, detail="Public URL not generated. Check bucket/path.")
+        # Encode path safely (spaces etc.)
+        safe_path = quote(path, safe="/")
 
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{safe_path}"
         return {"public_url": public_url}
 
     except HTTPException:
