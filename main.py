@@ -23,9 +23,11 @@ class VideoRequest(BaseModel):
     bucket: str
     path: str
 
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "version": "3.0.0"}
+
 
 @app.post("/video-url")
 def get_video_url(data: VideoRequest):
@@ -36,6 +38,7 @@ def get_video_url(data: VideoRequest):
         raise HTTPException(status_code=400, detail="bucket and path required")
 
     safe_path = quote(path, safe="/")
+
     public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{safe_path}"
 
     return {"public_url": public_url}
