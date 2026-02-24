@@ -1,2 +1,0 @@
-# GurukulAI
-AI Educator
