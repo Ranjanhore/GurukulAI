@@ -19,7 +19,7 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────────
-app = FastAPI(title="GurukulAI Backend", version="1.2.2")
+app = FastAPI(title="GurukulAI Backend", version="1.2.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,7 +44,7 @@ DEFAULT_VIDEO_URL = os.getenv("DEFAULT_VIDEO_URL", "https://example.com/video.mp
 SB_TABLE_SESSIONS = os.getenv("SB_TABLE_SESSIONS", "sessions")
 SB_TABLE_MESSAGES = os.getenv("SB_TABLE_MESSAGES", "messages")
 
-# ✅ DB role values must match your Supabase constraint (student/teacher)
+# ✅ Must match your Supabase role constraint values
 DB_ROLE_STUDENT = os.getenv("DB_ROLE_STUDENT", "student").strip().lower()
 DB_ROLE_TEACHER = os.getenv("DB_ROLE_TEACHER", "teacher").strip().lower()
 
@@ -127,18 +127,16 @@ def _db_role_to_openai_role(db_role: Optional[str]) -> str:
         return "user"
     if r == DB_ROLE_TEACHER:
         return "assistant"
-    # fallback: treat unknown as user
     return "user"
 
 
 def _as_input_item(role: str, text: str) -> Dict[str, Any]:
-    # Responses API-friendly format
     return {"role": role, "content": [{"type": "input_text", "text": text}]}
 
 
 async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
     """
-    history: list like [{"role": "user"|"assistant", "content": "..."}]
+    history: [{"role": "user"|"assistant", "content": "..."}]
     """
     if not OPENAI_API_KEY:
         return (
@@ -158,11 +156,7 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
             input_items.append(_as_input_item(role, content))
     input_items.append(_as_input_item("user", student_text))
 
-    payload = {
-        "model": OPENAI_MODEL,
-        "input": input_items,
-        "max_output_tokens": 450,
-    }
+    payload = {"model": OPENAI_MODEL, "input": input_items, "max_output_tokens": 450}
 
     async with httpx.AsyncClient(timeout=45) as client:
         r = await client.post(url, headers=headers, json=payload)
@@ -185,7 +179,15 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
 def root():
     return {
         "service": "GurukulAI Backend",
-        "routes": ["/health", "/video-url", "/session/start", "/respond", "/session/{session_id}", "/debug/supabase"],
+        "routes": [
+            "/health",
+            "/video-url",
+            "/session/start",
+            "/respond",
+            "/debug/respond",
+            "/session/{session_id}",
+            "/debug/supabase",
+        ],
         "ts": int(time.time()),
     }
 
@@ -283,12 +285,12 @@ async def respond(req: RespondReq):
         openai_role = _db_role_to_openai_role(m.get("role"))
         history.append({"role": openai_role, "content": text})
 
-    # 3) Save student message (role must satisfy DB constraint)
+    # 3) Save student message
     user_msg = {
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
-        "role": DB_ROLE_STUDENT,   # ✅ matches constraint
-        "text": req.text,          # ✅ your table column is "text"
+        "role": DB_ROLE_STUDENT,
+        "text": req.text,
         "created_at": now_iso,
         "ts": ts,
     }
@@ -308,7 +310,7 @@ async def respond(req: RespondReq):
     bot_msg = {
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
-        "role": DB_ROLE_TEACHER,   # ✅ matches constraint
+        "role": DB_ROLE_TEACHER,
         "text": teacher_text,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "ts": int(time.time()),
@@ -323,6 +325,50 @@ async def respond(req: RespondReq):
         mem_add_message(req.session_id, bot_msg)
 
     return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=int(time.time()))
+
+
+# ✅ Debug route (returns exactly what DB + mapping looks like)
+@app.post("/debug/respond")
+async def debug_respond(req: RespondReq):
+    if not sb:
+        raise HTTPException(status_code=400, detail="Supabase not initialized (debug route needs Supabase)")
+
+    # Read session
+    sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
+    sdata = getattr(sres, "data", None) or []
+    if not sdata:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Read last messages
+    mres = (
+        sb.table(SB_TABLE_MESSAGES)
+        .select("*")
+        .eq("session_id", req.session_id)
+        .order("created_at")
+        .limit(50)
+        .execute()
+    )
+    msgs = getattr(mres, "data", None) or []
+
+    mapped = []
+    for m in msgs[-20:]:
+        mapped.append(
+            {
+                "db_role": m.get("role"),
+                "openai_role": _db_role_to_openai_role(m.get("role")),
+                "text_preview": (m.get("text") or "")[:120],
+                "created_at": m.get("created_at"),
+            }
+        )
+
+    return {
+        "ok": True,
+        "session_id": req.session_id,
+        "db_roles": {"student": DB_ROLE_STUDENT, "teacher": DB_ROLE_TEACHER},
+        "message_count": len(msgs),
+        "mapped_history_tail": mapped,
+        "incoming_text": req.text,
+    }
 
 
 @app.get("/session/{session_id}")
