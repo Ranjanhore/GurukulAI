@@ -2,6 +2,7 @@ import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Literal
+from datetime import datetime
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -64,22 +65,30 @@ def debug_supabase():
         return {"ok": False, "exception": str(e)}
 
 @app.post("/session/start")
-def session_start_debug(req: StartSessionReq):
+def session_start(req: StartSessionReq):
     sid = str(uuid.uuid4())
-    created_at = int(time.time())
-    meta = req.model_dump()
-    row = {"id": sid, "created_at": created_at, "meta": meta}
+
+    row = {
+        "id": sid,
+        "student_name": req.student_name,
+        "teacher_name": "Asha",  # default teacher for now
+        "board": req.board,
+        "class_level": int(req.grade) if req.grade else None,
+        "subject": req.subject,
+        "preferred_language": "en",
+        "status": "ACTIVE",
+        "created_at": datetime.utcnow().isoformat()
+    }
 
     if sb:
         try:
-            res = sb.table(SB_TABLE_SESSIONS).insert(row).execute()
-            # If client stores error on response object
-            if getattr(res, "error", None):
-                raise Exception(str(res.error))
+            sb.table("sessions").insert(row).execute()
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Supabase insert session failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
     else:
         mem_create_session(row)
+
+    return {"session_id": sid, "meta": row}
 
     return {"session_id": sid, "created_at": created_at, "meta": meta}
 
