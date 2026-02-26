@@ -216,43 +216,59 @@ def session_start(req: StartSessionReq):
 
 @app.post("/respond", response_model=RespondRes)
 async def respond(req: RespondReq):
+    if not sb:
+        raise HTTPException(status_code=500, detail="Supabase client not initialized")
+
     ts = int(time.time())
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # 1) Load session + messages
-    if sb:
-        try:
-            sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
-            sdata = getattr(sres, "data", None) or []
-            if not sdata:
-                raise HTTPException(status_code=404, detail="Session not found")
+    # load session
+    sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
+    sdata = getattr(sres, "data", None) or []
+    if not sdata:
+        raise HTTPException(status_code=404, detail="Session not found")
 
-            mres = (
-                sb.table(SB_TABLE_MESSAGES)
-                .select("*")
-                .eq("session_id", req.session_id)
-                .order("created_at")
-                .execute()
-            )
-            msgs = getattr(mres, "data", None) or []
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Supabase read failed: {str(e)}")
-    else:
-        s = mem_get_session(req.session_id)
-        if not s:
-            raise HTTPException(status_code=404, detail="Session not found")
-        msgs = s["messages"]
+    # load messages
+    mres = (
+        sb.table(SB_TABLE_MESSAGES)
+        .select("*")
+        .eq("session_id", req.session_id)
+        .order("created_at")
+        .execute()
+    )
+    msgs = getattr(mres, "data", None) or []
 
-    # 2) Build history
+    # build last 20 messages for context (use column: text)
     history: List[Dict[str, str]] = []
     for m in msgs[-20:]:
         role = m.get("role")
-        content = m.get("message")
+        content = m.get("text")  # ✅ IMPORTANT
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             history.append({"role": role, "content": content})
 
+    # save user message (use column: text)
+    user_msg = {
+        "id": str(uuid.uuid4()),
+        "session_id": req.session_id,
+        "role": "user",
+        "text": req.text,         # ✅ IMPORTANT
+        "created_at": now_iso,    # timestamptz ok
+    }
+    sb.table(SB_TABLE_MESSAGES).insert(user_msg).execute()
+
+    teacher_text = await brain_reply(history, req.text)
+
+    # save assistant message (use column: text)
+    bot_msg = {
+        "id": str(uuid.uuid4()),
+        "session_id": req.session_id,
+        "role": "assistant",
+        "text": teacher_text,     # ✅ IMPORTANT
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    sb.table(SB_TABLE_MESSAGES).insert(bot_msg).execute()
+
+    return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=ts)
     # 3) Save user message
     user_msg = {
         "id": str(uuid.uuid4()),
