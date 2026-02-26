@@ -222,6 +222,17 @@ def session_start(req: StartSessionReq):
 @app.post("/respond", response_model=RespondRes)
 async def respond(req: RespondReq):
     ts = int(time.time())
+    now_iso = datetime.now(timezone.utc).isoformat()   # ✅ paste here
+
+    user_msg = {
+  ...
+  "created_at": now_iso,
+}
+
+bot_msg = {
+  ...
+  "created_at": datetime.now(timezone.utc).isoformat(),
+}
 
     # load session + messages
     if sb:
@@ -254,12 +265,12 @@ async def respond(req: RespondReq):
 
     # save user message
     user_msg = {
-        "id": str(uuid.uuid4()),
-        "session_id": req.session_id,
-        "role": "user",
-        "content": req.text,
-        "created_at": ts,
-    }
+    "id": str(uuid.uuid4()),
+    "session_id": req.session_id,
+    "role": "user",
+    "content": req.text,
+    "created_at": now_iso,
+}
     if sb:
         sb.table(SB_TABLE_MESSAGES).insert(user_msg).execute()
     else:
@@ -268,13 +279,13 @@ async def respond(req: RespondReq):
     teacher_text = await brain_reply(history, req.text)
 
     # save assistant message
-    bot_msg = {
-        "id": str(uuid.uuid4()),
-        "session_id": req.session_id,
-        "role": "assistant",
-        "content": teacher_text,
-        "created_at": int(time.time()),
-    }
+bot_msg = {
+    "id": str(uuid.uuid4()),
+    "session_id": req.session_id,
+    "role": "assistant",
+    "content": teacher_text,
+    "created_at": datetime.now(timezone.utc).isoformat(),
+}
     if sb:
         sb.table(SB_TABLE_MESSAGES).insert(bot_msg).execute()
     else:
