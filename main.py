@@ -84,8 +84,7 @@ def mem_get_session(session_id: str) -> Optional[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────
 # Models
 # ─────────────────────────────────────────────────────────────
-Board = Literal["CBSE", "ICSE", "STATE", "OTHER"]
-
+Board = str
 
 class StartSessionReq(BaseModel):
     student_name: Optional[str] = None
