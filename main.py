@@ -64,7 +64,7 @@ def debug_supabase():
     except Exception as e:
         return {"ok": False, "exception": str(e)}
 
-@app.post("/session/start")
+@app.post("/session/start", response_model=StartSessionRes)
 def session_start(req: StartSessionReq):
     sid = str(uuid.uuid4())
 
@@ -166,12 +166,17 @@ Board = Literal["CBSE", "ICSE", "STATE", "OTHER"]
 
 
 class StartSessionReq(BaseModel):
+  from typing import Optional, Literal
+from pydantic import BaseModel
+
+Board = Literal["CBSE", "ICSE", "STATE", "OTHER"]
+
+class StartSessionReq(BaseModel):
     student_name: Optional[str] = None
     grade: Optional[str] = None
-    board: Optional[Board] = "CBSE"
+    board: Optional[Board] = "CBSE"   # default
     subject: Optional[str] = None
     chapter: Optional[str] = None
-
 
 class StartSessionRes(BaseModel):
     session_id: str
