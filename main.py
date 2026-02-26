@@ -2,7 +2,7 @@ import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -219,17 +219,30 @@ def video_url():
 @app.post("/session/start", response_model=StartSessionRes)
 def session_start(req: StartSessionReq):
     sid = str(uuid.uuid4())
-    created_at = int(time.time())
-    meta = req.model_dump()
 
-    row = {"id": sid, "created_at": created_at, "meta": meta}
+    # map your API request -> your existing Supabase sessions table columns
+    row = {
+        "id": sid,
+        "student_name": req.student_name or "Student",
+        "teacher_name": "Asha",  # default for now
+        "board": req.board or "CBSE",
+        "class_level": int(req.grade) if req.grade else None,
+        "subject": req.subject,
+        "preferred_language": "en",
+        "status": "ACTIVE",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
 
     if sb:
-        sb.table(SB_TABLE_SESSIONS).insert(row).execute()
+        try:
+            sb.table(SB_TABLE_SESSIONS).insert(row).execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Supabase insert failed: {str(e)}")
     else:
         mem_create_session(row)
 
-    return StartSessionRes(session_id=sid, created_at=created_at, meta=meta)
+    # keep your API response shape
+    return StartSessionRes(session_id=sid, created_at=int(time.time()), meta=row))
 
 
 @app.post("/respond", response_model=RespondRes)
