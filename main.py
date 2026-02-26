@@ -48,18 +48,20 @@ def get_supabase():
 
 sb = get_supabase()
 
-from fastapi import Request
-
 @app.get("/debug/supabase")
 def debug_supabase():
     if not sb:
-        return {"ok": False, "reason": "supabase client not initialized (missing env or library)"}
+        return {"ok": False, "reason": "Supabase client not initialized"}
+
     try:
         res = sb.table(SB_TABLE_SESSIONS).select("*").limit(1).execute()
-        return {"ok": True, "data": getattr(res, "data", None)}
+        return {
+            "ok": True,
+            "data": getattr(res, "data", None),
+            "error": getattr(res, "error", None)
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase debug failed: {str(e)}")
-
+        return {"ok": False, "exception": str(e)}
 
 @app.post("/session/start")
 def session_start_debug(req: StartSessionReq):
