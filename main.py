@@ -247,7 +247,7 @@ async def respond(req: RespondReq):
     user_msg = {
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
-        "role": "user",
+        "role": DB_ROLE_STUDENT,
         "text": req.text,          # ✅ FIXED
         "created_at": now_iso,     # timestamptz ok
         "ts": ts,                  # your table has ts bigint (optional but good)
@@ -268,7 +268,7 @@ async def respond(req: RespondReq):
     bot_msg = {
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
-        "role": "assistant",
+        "role": DB_ROLE_TEACHER,
         "text": teacher_text,      # ✅ FIXED
         "created_at": datetime.now(timezone.utc).isoformat(),
         "ts": int(time.time()),
