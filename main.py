@@ -249,7 +249,7 @@ async def respond(req: RespondReq):
     history: List[Dict[str, str]] = []
     for m in msgs[-20:]:
         role = m.get("role")
-        content = m.get("content")
+        content = m.get("message")
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             history.append({"role": role, "content": content})
 
@@ -258,7 +258,7 @@ async def respond(req: RespondReq):
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
         "role": "user",
-        "content": req.text,
+        "message": req.text,
         "created_at": now_iso,
     }
 
