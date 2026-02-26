@@ -19,7 +19,7 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────────
-app = FastAPI(title="GurukulAI Backend", version="1.2.0")
+app = FastAPI(title="GurukulAI Backend", version="1.2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,7 +28,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # ─────────────────────────────────────────────────────────────
 # Config (env)
@@ -57,9 +56,8 @@ def get_supabase():
 
 sb = get_supabase()
 
-
 # ─────────────────────────────────────────────────────────────
-# In-memory fallback
+# In-memory fallback (only used if Supabase not available)
 # ─────────────────────────────────────────────────────────────
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _MESSAGES: Dict[str, List[Dict[str, Any]]] = {}
@@ -84,7 +82,8 @@ def mem_get_session(session_id: str) -> Optional[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────
 # Models
 # ─────────────────────────────────────────────────────────────
-Board = str
+Board = Literal["CBSE", "ICSE", "STATE", "OTHER"]
+
 
 class StartSessionReq(BaseModel):
     student_name: Optional[str] = None
@@ -130,10 +129,15 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
         )
 
     url = f"{OPENAI_BASE_URL.rstrip('/')}/responses"
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
     payload = {
         "model": OPENAI_MODEL,
-        "input": [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": student_text}],
+        "input": [{"role": "system", "content": SYSTEM_PROMPT}]
+        + history
+        + [{"role": "user", "content": student_text}],
         "max_output_tokens": 450,
     }
 
@@ -148,6 +152,7 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
         for c in out.get("content", []) or []:
             if c.get("type") == "output_text" and c.get("text"):
                 parts.append(c["text"])
+
     return ("\n".join(parts)).strip() or "Can you repeat that in one short line?"
 
 
@@ -158,7 +163,14 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
 def root():
     return {
         "service": "GurukulAI Backend",
-        "routes": ["/health", "/video-url", "/session/start", "/respond", "/session/{session_id}", "/debug/supabase"],
+        "routes": [
+            "/health",
+            "/video-url",
+            "/session/start",
+            "/respond",
+            "/session/{session_id}",
+            "/debug/supabase",
+        ],
         "ts": int(time.time()),
     }
 
@@ -184,7 +196,11 @@ def debug_supabase():
         return {"ok": False, "reason": "Supabase client not initialized"}
     try:
         res = sb.table(SB_TABLE_SESSIONS).select("*").limit(1).execute()
-        return {"ok": True, "data": getattr(res, "data", None), "error": getattr(res, "error", None)}
+        return {
+            "ok": True,
+            "data": getattr(res, "data", None),
+            "error": getattr(res, "error", None),
+        }
     except Exception as e:
         return {"ok": False, "exception": str(e)}
 
@@ -204,7 +220,8 @@ def session_start(req: StartSessionReq):
         "subject": req.subject,
         "preferred_language": "en",
         "status": "ACTIVE",
-        "created_at": datetime.now(timezone.utc).isoformat(),  # timestamp in DB
+        # sessions.created_at is usually timestamptz → store ISO
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
     if sb:
@@ -221,51 +238,7 @@ def session_start(req: StartSessionReq):
 @app.post("/respond", response_model=RespondRes)
 async def respond(req: RespondReq):
     ts = int(time.time())
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    # load session
-    sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
-    sdata = getattr(sres, "data", None) or []
-    if not sdata:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    mres = (
-        sb.table(SB_TABLE_MESSAGES)
-        .select("*")
-        .eq("session_id", req.session_id)
-        .order("created_at")
-        .execute()
-    )
-    msgs = getattr(mres, "data", None) or []
-
-    history = []
-    for m in msgs[-20:]:
-        if m.get("role") in ("user", "assistant") and m.get("content"):
-            history.append({"role": m["role"], "content": m["content"]})
-
-    # ✅ FIXED USER MESSAGE
-    user_msg = {
-        "id": str(uuid.uuid4()),
-        "session_id": req.session_id,
-        "role": "user",
-        "content": req.text,
-        "created_at": now_iso,
-    }
-    sb.table(SB_TABLE_MESSAGES).insert(user_msg).execute()
-
-    teacher_text = await brain_reply(history, req.text)
-
-    # ✅ FIXED BOT MESSAGE
-    bot_msg = {
-        "id": str(uuid.uuid4()),
-        "session_id": req.session_id,
-        "role": "assistant",
-        "content": teacher_text,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    sb.table(SB_TABLE_MESSAGES).insert(bot_msg).execute()
-
-    return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=ts)
+    now_iso = datetime.now(timezone.utc).isoformat()  # ✅ paste/use here
 
     # load session + messages
     if sb:
@@ -296,14 +269,14 @@ async def respond(req: RespondReq):
         if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             history.append({"role": role, "content": content})
 
-    # save user message
+    # save user message (messages.created_at = timestamptz → ISO string)
     user_msg = {
-    "id": str(uuid.uuid4()),
-    "session_id": req.session_id,
-    "role": "user",
-    "content": req.text,
-    "created_at": now_iso,
-}
+        "id": str(uuid.uuid4()),
+        "session_id": req.session_id,
+        "role": "user",
+        "content": req.text,
+        "created_at": now_iso,
+    }
     if sb:
         sb.table(SB_TABLE_MESSAGES).insert(user_msg).execute()
     else:
@@ -312,19 +285,19 @@ async def respond(req: RespondReq):
     teacher_text = await brain_reply(history, req.text)
 
     # save assistant message
-bot_msg = {
-    "id": str(uuid.uuid4()),
-    "session_id": req.session_id,
-    "role": "assistant",
-    "content": teacher_text,
-    "created_at": datetime.now(timezone.utc).isoformat(),
-}
+    bot_msg = {
+        "id": str(uuid.uuid4()),
+        "session_id": req.session_id,
+        "role": "assistant",
+        "content": teacher_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
     if sb:
         sb.table(SB_TABLE_MESSAGES).insert(bot_msg).execute()
     else:
         mem_add_message(req.session_id, bot_msg)
 
-    return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=int(time.time()))
+    return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=ts)
 
 
 @app.get("/session/{session_id}")
