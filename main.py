@@ -19,7 +19,7 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────────
-app = FastAPI(title="GurukulAI Backend", version="1.2.1")
+app = FastAPI(title="GurukulAI Backend", version="1.2.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,6 +43,10 @@ DEFAULT_VIDEO_URL = os.getenv("DEFAULT_VIDEO_URL", "https://example.com/video.mp
 
 SB_TABLE_SESSIONS = os.getenv("SB_TABLE_SESSIONS", "sessions")
 SB_TABLE_MESSAGES = os.getenv("SB_TABLE_MESSAGES", "messages")
+
+# ✅ DB role values must match your Supabase constraint (student/teacher)
+DB_ROLE_STUDENT = os.getenv("DB_ROLE_STUDENT", "student").strip().lower()
+DB_ROLE_TEACHER = os.getenv("DB_ROLE_TEACHER", "teacher").strip().lower()
 
 
 def get_supabase():
@@ -117,7 +121,25 @@ Be kid-friendly, simple, encouraging.
 """
 
 
+def _db_role_to_openai_role(db_role: Optional[str]) -> str:
+    r = (db_role or "").strip().lower()
+    if r == DB_ROLE_STUDENT:
+        return "user"
+    if r == DB_ROLE_TEACHER:
+        return "assistant"
+    # fallback: treat unknown as user
+    return "user"
+
+
+def _as_input_item(role: str, text: str) -> Dict[str, Any]:
+    # Responses API-friendly format
+    return {"role": role, "content": [{"type": "input_text", "text": text}]}
+
+
 async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
+    """
+    history: list like [{"role": "user"|"assistant", "content": "..."}]
+    """
     if not OPENAI_API_KEY:
         return (
             "I’m your GurukulAI teacher 😊\n\n"
@@ -127,9 +149,18 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
 
     url = f"{OPENAI_BASE_URL.rstrip('/')}/responses"
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+
+    input_items: List[Dict[str, Any]] = [_as_input_item("system", SYSTEM_PROMPT)]
+    for m in history:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if isinstance(content, str) and content.strip():
+            input_items.append(_as_input_item(role, content))
+    input_items.append(_as_input_item("user", student_text))
+
     payload = {
         "model": OPENAI_MODEL,
-        "input": [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": student_text}],
+        "input": input_items,
         "max_output_tokens": 450,
     }
 
@@ -142,7 +173,7 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
     parts: List[str] = []
     for out in data.get("output", []) or []:
         for c in out.get("content", []) or []:
-            if c.get("type") == "output_text" and c.get("text"):
+            if c.get("type") in ("output_text", "text") and c.get("text"):
                 parts.append(c["text"])
     return ("\n".join(parts)).strip() or "Can you repeat that in one short line?"
 
@@ -216,18 +247,26 @@ async def respond(req: RespondReq):
 
     # 1) Load session + messages
     if sb:
-        sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
+        try:
+            sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Supabase read session failed: {str(e)}")
+
         sdata = getattr(sres, "data", None) or []
         if not sdata:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        mres = (
-            sb.table(SB_TABLE_MESSAGES)
-            .select("*")
-            .eq("session_id", req.session_id)
-            .order("created_at")
-            .execute()
-        )
+        try:
+            mres = (
+                sb.table(SB_TABLE_MESSAGES)
+                .select("*")
+                .eq("session_id", req.session_id)
+                .order("created_at")
+                .execute()
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Supabase read messages failed: {str(e)}")
+
         msgs = getattr(mres, "data", None) or []
     else:
         s = mem_get_session(req.session_id)
@@ -235,22 +274,23 @@ async def respond(req: RespondReq):
             raise HTTPException(status_code=404, detail="Session not found")
         msgs = s["messages"]
 
-    # 2) Build history (uses messages.text)
+    # 2) Build OpenAI history from DB messages.text + DB roles
     history: List[Dict[str, str]] = []
     for m in msgs[-20:]:
-        role = m.get("role")
-        text = m.get("text")  # ✅ IMPORTANT: your table uses "text"
-        if role in ("user", "assistant") and isinstance(text, str) and text.strip():
-            history.append({"role": role, "content": text})
+        text = m.get("text")
+        if not (isinstance(text, str) and text.strip()):
+            continue
+        openai_role = _db_role_to_openai_role(m.get("role"))
+        history.append({"role": openai_role, "content": text})
 
-    # 3) Save user message (uses messages.text)
+    # 3) Save student message (role must satisfy DB constraint)
     user_msg = {
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
-        "role": DB_ROLE_STUDENT,
-        "text": req.text,          # ✅ FIXED
-        "created_at": now_iso,     # timestamptz ok
-        "ts": ts,                  # your table has ts bigint (optional but good)
+        "role": DB_ROLE_STUDENT,   # ✅ matches constraint
+        "text": req.text,          # ✅ your table column is "text"
+        "created_at": now_iso,
+        "ts": ts,
     }
 
     if sb:
@@ -264,12 +304,12 @@ async def respond(req: RespondReq):
     # 4) Brain reply
     teacher_text = await brain_reply(history, req.text)
 
-    # 5) Save assistant message
+    # 5) Save teacher message
     bot_msg = {
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
-        "role": DB_ROLE_TEACHER,
-        "text": teacher_text,      # ✅ FIXED
+        "role": DB_ROLE_TEACHER,   # ✅ matches constraint
+        "text": teacher_text,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "ts": int(time.time()),
     }
