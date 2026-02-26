@@ -222,17 +222,51 @@ def session_start(req: StartSessionReq):
 @app.post("/respond", response_model=RespondRes)
 async def respond(req: RespondReq):
     ts = int(time.time())
-    now_iso = datetime.now(timezone.utc).isoformat()   # ✅ paste here
+    now_iso = datetime.now(timezone.utc).isoformat()
 
+    # load session
+    sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
+    sdata = getattr(sres, "data", None) or []
+    if not sdata:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    mres = (
+        sb.table(SB_TABLE_MESSAGES)
+        .select("*")
+        .eq("session_id", req.session_id)
+        .order("created_at")
+        .execute()
+    )
+    msgs = getattr(mres, "data", None) or []
+
+    history = []
+    for m in msgs[-20:]:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            history.append({"role": m["role"], "content": m["content"]})
+
+    # ✅ FIXED USER MESSAGE
     user_msg = {
-  ...
-  "created_at": now_iso,
-}
+        "id": str(uuid.uuid4()),
+        "session_id": req.session_id,
+        "role": "user",
+        "content": req.text,
+        "created_at": now_iso,
+    }
+    sb.table(SB_TABLE_MESSAGES).insert(user_msg).execute()
 
-bot_msg = {
-  ...
-  "created_at": datetime.now(timezone.utc).isoformat(),
-}
+    teacher_text = await brain_reply(history, req.text)
+
+    # ✅ FIXED BOT MESSAGE
+    bot_msg = {
+        "id": str(uuid.uuid4()),
+        "session_id": req.session_id,
+        "role": "assistant",
+        "content": teacher_text,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    sb.table(SB_TABLE_MESSAGES).insert(bot_msg).execute()
+
+    return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=ts)
 
     # load session + messages
     if sb:
