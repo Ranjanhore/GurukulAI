@@ -232,7 +232,10 @@ Rules:
 
 
 def _as_input_item(role: str, text: str) -> Dict[str, Any]:
-    return {"role": role, "content": [{"type": "input_text", "text": text}]}
+    return {
+        "role": role,
+        "content": text
+    }
 
 
 async def _openai_text(system_prompt: str, history: List[Dict[str, str]], user_text: str, max_tokens: int = 450) -> str:
