@@ -88,6 +88,19 @@ def session_start(req: StartSessionReq):
     else:
         mem_create_session(row)
 
+    return {
+        "session_id": sid,
+        "created_at": row["created_at"],
+        "meta": row
+    }
+    if sb:
+        try:
+            sb.table("sessions").insert(row).execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        mem_create_session(row)
+
     return {"session_id": sid, "meta": row}
 
     return {"session_id": sid, "created_at": created_at, "meta": meta}
