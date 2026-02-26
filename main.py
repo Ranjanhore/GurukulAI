@@ -19,11 +19,11 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────────
-app = FastAPI(title="GurukulAI Backend", version="1.3.0")
+app = FastAPI(title="GurukulAI Backend", version="1.2.1")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # lock later
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,7 +92,7 @@ class StartSessionReq(BaseModel):
 
 class StartSessionRes(BaseModel):
     session_id: str
-    created_at: int
+    created_at: int  # unix seconds
     meta: Dict[str, Any]
 
 
@@ -126,10 +126,7 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
         )
 
     url = f"{OPENAI_BASE_URL.rstrip('/')}/responses"
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": OPENAI_MODEL,
         "input": [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": student_text}],
@@ -138,17 +135,15 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
 
     async with httpx.AsyncClient(timeout=45) as client:
         r = await client.post(url, headers=headers, json=payload)
+        if r.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"OpenAI error: {r.text}")
+        data = r.json()
 
-    if r.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"OpenAI error: {r.text}")
-
-    data = r.json()
     parts: List[str] = []
     for out in data.get("output", []) or []:
         for c in out.get("content", []) or []:
             if c.get("type") == "output_text" and c.get("text"):
                 parts.append(c["text"])
-
     return ("\n".join(parts)).strip() or "Can you repeat that in one short line?"
 
 
@@ -177,7 +172,7 @@ def video_url():
 @app.get("/debug/supabase")
 def debug_supabase():
     if not sb:
-        return {"ok": False, "reason": "Supabase client not initialized (check env vars + supabase package)"}
+        return {"ok": False, "reason": "Supabase client not initialized"}
     try:
         res = sb.table(SB_TABLE_SESSIONS).select("*").limit(1).execute()
         return {"ok": True, "data": getattr(res, "data", None), "error": getattr(res, "error", None)}
@@ -216,66 +211,46 @@ def session_start(req: StartSessionReq):
 
 @app.post("/respond", response_model=RespondRes)
 async def respond(req: RespondReq):
-    if not sb:
-        raise HTTPException(status_code=500, detail="Supabase client not initialized")
-
     ts = int(time.time())
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # load session
-    sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
-    sdata = getattr(sres, "data", None) or []
-    if not sdata:
-        raise HTTPException(status_code=404, detail="Session not found")
+    # 1) Load session + messages
+    if sb:
+        sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
+        sdata = getattr(sres, "data", None) or []
+        if not sdata:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    # load messages
-    mres = (
-        sb.table(SB_TABLE_MESSAGES)
-        .select("*")
-        .eq("session_id", req.session_id)
-        .order("created_at")
-        .execute()
-    )
-    msgs = getattr(mres, "data", None) or []
+        mres = (
+            sb.table(SB_TABLE_MESSAGES)
+            .select("*")
+            .eq("session_id", req.session_id)
+            .order("created_at")
+            .execute()
+        )
+        msgs = getattr(mres, "data", None) or []
+    else:
+        s = mem_get_session(req.session_id)
+        if not s:
+            raise HTTPException(status_code=404, detail="Session not found")
+        msgs = s["messages"]
 
-    # build last 20 messages for context (use column: text)
+    # 2) Build history (uses messages.text)
     history: List[Dict[str, str]] = []
     for m in msgs[-20:]:
         role = m.get("role")
-        content = m.get("text")  # ✅ IMPORTANT
-        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
-            history.append({"role": role, "content": content})
+        text = m.get("text")  # ✅ IMPORTANT: your table uses "text"
+        if role in ("user", "assistant") and isinstance(text, str) and text.strip():
+            history.append({"role": role, "content": text})
 
-    # save user message (use column: text)
+    # 3) Save user message (uses messages.text)
     user_msg = {
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
         "role": "user",
-        "text": req.text,         # ✅ IMPORTANT
-        "created_at": now_iso,    # timestamptz ok
-    }
-    sb.table(SB_TABLE_MESSAGES).insert(user_msg).execute()
-
-    teacher_text = await brain_reply(history, req.text)
-
-    # save assistant message (use column: text)
-    bot_msg = {
-        "id": str(uuid.uuid4()),
-        "session_id": req.session_id,
-        "role": "assistant",
-        "text": teacher_text,     # ✅ IMPORTANT
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    sb.table(SB_TABLE_MESSAGES).insert(bot_msg).execute()
-
-    return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=ts)
-    # 3) Save user message
-    user_msg = {
-        "id": str(uuid.uuid4()),
-        "session_id": req.session_id,
-        "role": "user",
-        "message": req.text,
-        "created_at": now_iso,
+        "text": req.text,          # ✅ FIXED
+        "created_at": now_iso,     # timestamptz ok
+        "ts": ts,                  # your table has ts bigint (optional but good)
     }
 
     if sb:
@@ -294,8 +269,9 @@ async def respond(req: RespondReq):
         "id": str(uuid.uuid4()),
         "session_id": req.session_id,
         "role": "assistant",
-        "content": teacher_text,
+        "text": teacher_text,      # ✅ FIXED
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "ts": int(time.time()),
     }
 
     if sb:
@@ -306,7 +282,7 @@ async def respond(req: RespondReq):
     else:
         mem_add_message(req.session_id, bot_msg)
 
-    return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=ts)
+    return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=int(time.time()))
 
 
 @app.get("/session/{session_id}")
@@ -317,7 +293,13 @@ def session_get(session_id: str):
         if not sdata:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        mres = sb.table(SB_TABLE_MESSAGES).select("*").eq("session_id", session_id).order("created_at").execute()
+        mres = (
+            sb.table(SB_TABLE_MESSAGES)
+            .select("*")
+            .eq("session_id", session_id)
+            .order("created_at")
+            .execute()
+        )
         msgs = getattr(mres, "data", None) or []
         return {"session": sdata[0], "messages": msgs}
 
