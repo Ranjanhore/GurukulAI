@@ -1,12 +1,15 @@
 import os
 import time
 import uuid
+import asyncio
+from enum import Enum
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Optional Supabase (won't crash deploy if not installed)
@@ -19,7 +22,7 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 # App
 # ─────────────────────────────────────────────────────────────
-app = FastAPI(title="GurukulAI Backend", version="1.2.3")
+app = FastAPI(title="GurukulAI Backend", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,7 +47,7 @@ DEFAULT_VIDEO_URL = os.getenv("DEFAULT_VIDEO_URL", "https://example.com/video.mp
 SB_TABLE_SESSIONS = os.getenv("SB_TABLE_SESSIONS", "sessions")
 SB_TABLE_MESSAGES = os.getenv("SB_TABLE_MESSAGES", "messages")
 
-# ✅ Must match your Supabase role constraint values
+# ✅ Must match your Supabase role constraint values (student/teacher)
 DB_ROLE_STUDENT = os.getenv("DB_ROLE_STUDENT", "student").strip().lower()
 DB_ROLE_TEACHER = os.getenv("DB_ROLE_TEACHER", "teacher").strip().lower()
 
@@ -111,14 +114,88 @@ class RespondRes(BaseModel):
     ts: int
 
 
+class Phase(str, Enum):
+    INTRO = "INTRO"
+    TEACH = "TEACH"
+    QUIZ = "QUIZ"
+    WRAP = "WRAP"
+
+
+class Mode(str, Enum):
+    WARM = "WARM"
+    STRICT = "STRICT"
+    FUNNY = "FUNNY"
+    EXAM = "EXAM"
+
+
+class TeachReqV2(BaseModel):
+    session_id: str
+    text: str = Field(min_length=1, max_length=4000)
+    phase: Phase = Phase.TEACH
+    mode: Mode = Mode.WARM
+
+
+class TeachRes(BaseModel):
+    session_id: str
+    phase: Phase
+    teacher_text: str
+    ts: int
+
+
+class OutlineReq(BaseModel):
+    grade: Optional[str] = None
+    board: Optional[str] = "CBSE"
+    subject: Optional[str] = None
+    chapter: str = Field(min_length=1, max_length=200)
+
+
+class OutlineRes(BaseModel):
+    outline: List[str]
+    ts: int
+
+
 # ─────────────────────────────────────────────────────────────
-# Brain (OpenAI)
+# Brain / Prompts
 # ─────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are GurukulAI Teacher (warm, patient, story-like).
+BASE_SYSTEM_PROMPT = """You are GurukulAI Teacher (warm, patient, story-like).
 Explain step-by-step in small chunks.
 After each chunk, ask 1 short check-question.
 Be kid-friendly, simple, encouraging.
+Use simple examples.
 """
+
+
+def mode_style(mode: Mode) -> str:
+    if mode == Mode.STRICT:
+        return "Style: strict, concise, exam-focused, no emojis."
+    if mode == Mode.FUNNY:
+        return "Style: playful, light jokes, simple metaphors, a few emojis."
+    if mode == Mode.EXAM:
+        return "Style: board-exam oriented, definitions + typical questions."
+    return "Style: warm, patient, encouraging, story-like, a few emojis."
+
+
+def build_system_prompt(phase: Phase, mode: Mode, meta: Dict[str, Any]) -> str:
+    student_name = meta.get("student_name") or "Student"
+    grade = meta.get("class_level") or meta.get("grade") or ""
+    board = meta.get("board") or ""
+    subject = meta.get("subject") or ""
+    chapter = meta.get("chapter") or ""
+
+    context = (
+        f"\nStudent: {student_name}\nGrade: {grade}\nBoard: {board}\n"
+        f"Subject: {subject}\nChapter: {chapter}\n"
+    )
+
+    goal = "Goal: Teach the topic clearly like a story."
+    if phase == Phase.INTRO:
+        goal = "Goal: Greet, confirm class/board, ask 1 warm-up question, then say 'Ready?'."
+    elif phase == Phase.QUIZ:
+        goal = "Goal: Ask 5 short questions (1-line each), wait for answers, give tiny hints."
+    elif phase == Phase.WRAP:
+        goal = "Goal: Summarize in 5 bullets + 1 small homework task."
+
+    return BASE_SYSTEM_PROMPT + context + "\n" + mode_style(mode) + "\n" + goal
 
 
 def _db_role_to_openai_role(db_role: Optional[str]) -> str:
@@ -131,30 +208,31 @@ def _db_role_to_openai_role(db_role: Optional[str]) -> str:
 
 
 def _as_input_item(role: str, text: str) -> Dict[str, Any]:
+    # Responses API-friendly format
     return {"role": role, "content": [{"type": "input_text", "text": text}]}
 
 
-async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
+async def openai_responses(system_prompt: str, history: List[Dict[str, str]], user_text: str) -> str:
     """
-    history: [{"role": "user"|"assistant", "content": "..."}]
+    history: [{"role":"user|assistant","content":"..."}]
     """
     if not OPENAI_API_KEY:
         return (
             "I’m your GurukulAI teacher 😊\n\n"
-            f"You said: “{student_text}”.\n"
+            f"You said: “{user_text}”.\n"
             "Tell me your class and chapter name, I’ll teach it like a story."
         )
 
     url = f"{OPENAI_BASE_URL.rstrip('/')}/responses"
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
 
-    input_items: List[Dict[str, Any]] = [_as_input_item("system", SYSTEM_PROMPT)]
+    input_items: List[Dict[str, Any]] = [_as_input_item("system", system_prompt)]
     for m in history:
         role = m.get("role", "user")
         content = m.get("content", "")
         if isinstance(content, str) and content.strip():
             input_items.append(_as_input_item(role, content))
-    input_items.append(_as_input_item("user", student_text))
+    input_items.append(_as_input_item("user", user_text))
 
     payload = {"model": OPENAI_MODEL, "input": input_items, "max_output_tokens": 450}
 
@@ -172,6 +250,31 @@ async def brain_reply(history: List[Dict[str, str]], student_text: str) -> str:
     return ("\n".join(parts)).strip() or "Can you repeat that in one short line?"
 
 
+async def summarize_session(messages: List[Dict[str, Any]]) -> str:
+    chunks: List[str] = []
+    for m in messages[-30:]:
+        role = m.get("role")
+        text = (m.get("text") or "").strip()
+        if role and text:
+            chunks.append(f"{role}: {text}")
+    transcript = "\n".join(chunks).strip()
+    if not transcript:
+        return ""
+
+    prompt = (
+        "Summarize this tutoring session in 6 bullet points.\n"
+        "Include: what was taught, key definitions, examples used, student confusions, quiz performance, next steps.\n"
+        "Be concise.\n\n"
+        f"{transcript}"
+    )
+
+    return await openai_responses(
+        system_prompt="You are an expert education session summarizer. Return only bullet points.",
+        history=[],
+        user_text=prompt,
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 # Routes
 # ─────────────────────────────────────────────────────────────
@@ -184,6 +287,9 @@ def root():
             "/video-url",
             "/session/start",
             "/respond",
+            "/respond/stream",
+            "/teach",
+            "/chapter/outline",
             "/debug/respond",
             "/session/{session_id}",
             "/debug/supabase",
@@ -226,6 +332,7 @@ def session_start(req: StartSessionReq):
         "board": req.board or "CBSE",
         "class_level": int(req.grade) if req.grade else None,
         "subject": req.subject,
+        "chapter": req.chapter,
         "preferred_language": "en",
         "status": "ACTIVE",
         "created_at": now_iso,
@@ -242,104 +349,197 @@ def session_start(req: StartSessionReq):
     return StartSessionRes(session_id=sid, created_at=now_ts, meta=session_row)
 
 
+def _load_session_and_messages(session_id: str) -> (Dict[str, Any], List[Dict[str, Any]]):
+    if sb:
+        sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", session_id).limit(1).execute()
+        sdata = getattr(sres, "data", None) or []
+        if not sdata:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        mres = (
+            sb.table(SB_TABLE_MESSAGES)
+            .select("*")
+            .eq("session_id", session_id)
+            .order("created_at")
+            .execute()
+        )
+        msgs = getattr(mres, "data", None) or []
+        return sdata[0], msgs
+
+    s = mem_get_session(session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    # memory session stores messages under "messages"
+    return s, s.get("messages", [])
+
+
+def _build_history_from_msgs(msgs: List[Dict[str, Any]], limit: int = 20) -> List[Dict[str, str]]:
+    history: List[Dict[str, str]] = []
+    for m in msgs[-limit:]:
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        history.append({"role": _db_role_to_openai_role(m.get("role")), "content": text})
+    return history
+
+
+def _insert_message(session_id: str, role: str, text: str, created_at_iso: str, ts_int: int) -> None:
+    row = {
+        "id": str(uuid.uuid4()),
+        "session_id": session_id,
+        "role": role,
+        "text": text,
+        "created_at": created_at_iso,
+        "ts": ts_int,
+    }
+    if sb:
+        sb.table(SB_TABLE_MESSAGES).insert(row).execute()
+    else:
+        mem_add_message(session_id, row)
+
+
 @app.post("/respond", response_model=RespondRes)
 async def respond(req: RespondReq):
     ts = int(time.time())
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # 1) Load session + messages
+    meta, msgs = _load_session_and_messages(req.session_id)
+    history = _build_history_from_msgs(msgs, limit=20)
+
+    # save student message
+    try:
+        _insert_message(req.session_id, DB_ROLE_STUDENT, req.text, now_iso, ts)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Insert student message failed: {str(e)}")
+
+    # reply
+    system_prompt = build_system_prompt(Phase.TEACH, Mode.WARM, meta)
+    teacher_text = await openai_responses(system_prompt, history, req.text)
+
+    # save teacher message
+    try:
+        _insert_message(req.session_id, DB_ROLE_TEACHER, teacher_text, datetime.now(timezone.utc).isoformat(), int(time.time()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Insert teacher message failed: {str(e)}")
+
+    # optional: update summary every 6 messages (Supabase only)
     if sb:
         try:
-            sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Supabase read session failed: {str(e)}")
-
-        sdata = getattr(sres, "data", None) or []
-        if not sdata:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        try:
-            mres = (
+            latest = (
                 sb.table(SB_TABLE_MESSAGES)
                 .select("*")
                 .eq("session_id", req.session_id)
                 .order("created_at")
                 .execute()
             )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Supabase read messages failed: {str(e)}")
-
-        msgs = getattr(mres, "data", None) or []
-    else:
-        s = mem_get_session(req.session_id)
-        if not s:
-            raise HTTPException(status_code=404, detail="Session not found")
-        msgs = s["messages"]
-
-    # 2) Build OpenAI history from DB messages.text + DB roles
-    history: List[Dict[str, str]] = []
-    for m in msgs[-20:]:
-        text = m.get("text")
-        if not (isinstance(text, str) and text.strip()):
-            continue
-        openai_role = _db_role_to_openai_role(m.get("role"))
-        history.append({"role": openai_role, "content": text})
-
-    # 3) Save student message
-    user_msg = {
-        "id": str(uuid.uuid4()),
-        "session_id": req.session_id,
-        "role": DB_ROLE_STUDENT,
-        "text": req.text,
-        "created_at": now_iso,
-        "ts": ts,
-    }
-
-    if sb:
-        try:
-            sb.table(SB_TABLE_MESSAGES).insert(user_msg).execute()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Supabase insert user message failed: {str(e)}")
-    else:
-        mem_add_message(req.session_id, user_msg)
-
-    # 4) Brain reply
-    teacher_text = await brain_reply(history, req.text)
-
-    # 5) Save teacher message
-    bot_msg = {
-        "id": str(uuid.uuid4()),
-        "session_id": req.session_id,
-        "role": DB_ROLE_TEACHER,
-        "text": teacher_text,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "ts": int(time.time()),
-    }
-
-    if sb:
-        try:
-            sb.table(SB_TABLE_MESSAGES).insert(bot_msg).execute()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Supabase insert bot message failed: {str(e)}")
-    else:
-        mem_add_message(req.session_id, bot_msg)
+            latest_msgs = getattr(latest, "data", None) or []
+            if (len(latest_msgs) % 6) == 0:
+                summary = await summarize_session(latest_msgs)
+                if summary:
+                    sb.table(SB_TABLE_SESSIONS).update({"summary": summary}).eq("id", req.session_id).execute()
+        except Exception:
+            pass
 
     return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=int(time.time()))
 
 
-# ✅ Debug route (returns exactly what DB + mapping looks like)
+@app.post("/respond/stream")
+async def respond_stream(req: RespondReq):
+    """
+    SSE stream that chunks the final response.
+    (Not true token streaming yet, but feels live in UI.)
+    """
+
+    async def event_gen():
+        # sanity: session exists
+        try:
+            meta, msgs = _load_session_and_messages(req.session_id)
+        except HTTPException as e:
+            yield f"event: error\ndata: {e.detail}\n\n"
+            return
+
+        history = _build_history_from_msgs(msgs, limit=20)
+
+        # insert student message
+        try:
+            _insert_message(req.session_id, DB_ROLE_STUDENT, req.text, datetime.now(timezone.utc).isoformat(), int(time.time()))
+        except Exception as e:
+            yield f"event: error\ndata: Insert student failed: {str(e)}\n\n"
+            return
+
+        # produce reply
+        system_prompt = build_system_prompt(Phase.TEACH, Mode.WARM, meta)
+        teacher_text = await openai_responses(system_prompt, history, req.text)
+
+        # stream chunks
+        chunk_size = 50
+        for i in range(0, len(teacher_text), chunk_size):
+            piece = teacher_text[i : i + chunk_size]
+            yield f"event: delta\ndata: {piece}\n\n"
+            await asyncio.sleep(0.01)
+
+        # insert teacher message
+        try:
+            _insert_message(req.session_id, DB_ROLE_TEACHER, teacher_text, datetime.now(timezone.utc).isoformat(), int(time.time()))
+        except Exception as e:
+            yield f"event: error\ndata: Insert teacher failed: {str(e)}\n\n"
+            return
+
+        yield "event: done\ndata: ok\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+@app.post("/teach", response_model=TeachRes)
+async def teach(req: TeachReqV2):
+    ts = int(time.time())
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    meta, msgs = _load_session_and_messages(req.session_id)
+    history = _build_history_from_msgs(msgs, limit=20)
+
+    # save student message
+    _insert_message(req.session_id, DB_ROLE_STUDENT, req.text, now_iso, ts)
+
+    # phase + mode prompt
+    system_prompt = build_system_prompt(req.phase, req.mode, meta)
+    teacher_text = await openai_responses(system_prompt, history, req.text)
+
+    # save teacher message
+    _insert_message(req.session_id, DB_ROLE_TEACHER, teacher_text, datetime.now(timezone.utc).isoformat(), int(time.time()))
+
+    return TeachRes(session_id=req.session_id, phase=req.phase, teacher_text=teacher_text, ts=int(time.time()))
+
+
+@app.post("/chapter/outline", response_model=OutlineRes)
+async def chapter_outline(req: OutlineReq):
+    prompt = (
+        f"Create a teaching outline for Class {req.grade or ''} {req.board or ''}.\n"
+        f"Subject: {req.subject or ''}\n"
+        f"Chapter: {req.chapter}\n\n"
+        "Return exactly 10 bullet points (short)."
+    )
+    text = await openai_responses(
+        system_prompt="You are a helpful curriculum planner. Return a short outline only.",
+        history=[],
+        user_text=prompt,
+    )
+
+    lines = [ln.strip("•- \t") for ln in text.splitlines() if ln.strip()]
+    outline = [ln for ln in lines if len(ln) > 2][:10]
+    return OutlineRes(outline=outline or [text[:120]], ts=int(time.time()))
+
+
 @app.post("/debug/respond")
 async def debug_respond(req: RespondReq):
     if not sb:
         raise HTTPException(status_code=400, detail="Supabase not initialized (debug route needs Supabase)")
 
-    # Read session
     sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
     sdata = getattr(sres, "data", None) or []
     if not sdata:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Read last messages
     mres = (
         sb.table(SB_TABLE_MESSAGES)
         .select("*")
