@@ -48,6 +48,39 @@ def get_supabase():
 
 sb = get_supabase()
 
+from fastapi import Request
+
+@app.get("/debug/supabase")
+def debug_supabase():
+    if not sb:
+        return {"ok": False, "reason": "supabase client not initialized (missing env or library)"}
+    try:
+        res = sb.table(SB_TABLE_SESSIONS).select("*").limit(1).execute()
+        return {"ok": True, "data": getattr(res, "data", None)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase debug failed: {str(e)}")
+
+
+@app.post("/session/start")
+def session_start_debug(req: StartSessionReq):
+    sid = str(uuid.uuid4())
+    created_at = int(time.time())
+    meta = req.model_dump()
+    row = {"id": sid, "created_at": created_at, "meta": meta}
+
+    if sb:
+        try:
+            res = sb.table(SB_TABLE_SESSIONS).insert(row).execute()
+            # If client stores error on response object
+            if getattr(res, "error", None):
+                raise Exception(str(res.error))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Supabase insert session failed: {str(e)}")
+    else:
+        mem_create_session(row)
+
+    return {"session_id": sid, "created_at": created_at, "meta": meta}
+
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _MESSAGES: Dict[str, List[Dict[str, Any]]] = {}
 
