@@ -238,28 +238,80 @@ def session_start(req: StartSessionReq):
 @app.post("/respond", response_model=RespondRes)
 async def respond(req: RespondReq):
     ts = int(time.time())
-    now_iso = datetime.now(timezone.utc).isoformat()  # ✅ paste/use here
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-    # load session + messages
-    if sb:
-        sres = sb.table(SB_TABLE_SESSIONS).select("*").eq("id", req.session_id).limit(1).execute()
-        sdata = getattr(sres, "data", None) or []
-        if not sdata:
-            raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        # load session + messages
+        if sb:
+            sres = (
+                sb.table(SB_TABLE_SESSIONS)
+                .select("*")
+                .eq("id", req.session_id)
+                .limit(1)
+                .execute()
+            )
+            sdata = getattr(sres, "data", None) or []
+            if not sdata:
+                raise HTTPException(status_code=404, detail="Session not found")
 
-        mres = (
-            sb.table(SB_TABLE_MESSAGES)
-            .select("*")
-            .eq("session_id", req.session_id)
-            .order("created_at")
-            .execute()
-        )
-        msgs = getattr(mres, "data", None) or []
-    else:
-        s = mem_get_session(req.session_id)
-        if not s:
-            raise HTTPException(status_code=404, detail="Session not found")
-        msgs = s["messages"]
+            mres = (
+                sb.table(SB_TABLE_MESSAGES)
+                .select("*")
+                .eq("session_id", req.session_id)
+                .order("created_at")
+                .execute()
+            )
+            msgs = getattr(mres, "data", None) or []
+        else:
+            s = mem_get_session(req.session_id)
+            if not s:
+                raise HTTPException(status_code=404, detail="Session not found")
+            msgs = s["messages"]
+
+        # build history
+        history: List[Dict[str, str]] = []
+        for m in msgs[-20:]:
+            role = m.get("role")
+            content = m.get("content")
+            if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+                history.append({"role": role, "content": content})
+
+        # save user message
+        user_msg = {
+            "id": str(uuid.uuid4()),
+            "session_id": req.session_id,
+            "role": "user",
+            "content": req.text,
+            "created_at": now_iso,  # timestamptz compatible
+        }
+        if sb:
+            sb.table(SB_TABLE_MESSAGES).insert(user_msg).execute()
+        else:
+            mem_add_message(req.session_id, user_msg)
+
+        # AI reply
+        teacher_text = await brain_reply(history, req.text)
+
+        # save assistant message
+        bot_msg = {
+            "id": str(uuid.uuid4()),
+            "session_id": req.session_id,
+            "role": "assistant",
+            "content": teacher_text,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if sb:
+            sb.table(SB_TABLE_MESSAGES).insert(bot_msg).execute()
+        else:
+            mem_add_message(req.session_id, bot_msg)
+
+        return RespondRes(session_id=req.session_id, teacher_text=teacher_text, ts=ts)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # IMPORTANT: surface the real error instead of "Internal Server Error"
+        raise HTTPException(status_code=500, detail=f"/respond crashed: {repr(e)}")
 
     # build last 20 messages for context
     history: List[Dict[str, str]] = []
