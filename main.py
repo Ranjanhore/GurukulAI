@@ -1,6 +1,5 @@
 import os
 import re
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Literal, Tuple
@@ -21,14 +20,13 @@ from reportlab.lib.units import cm
 # ─────────────────────────────────────────────────────────────
 
 APP_NAME = "GurukulAI Backend"
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    # You can still run locally for basic checks, but DB calls will fail
-    print("⚠️ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in env")
+    print("⚠️ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in env (DB calls will fail)")
 
 sb: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
@@ -106,15 +104,31 @@ def safe_int(v: Any, default: int = 0) -> int:
 def clamp(n: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, n))
 
+# ---- XP / Levels (better curve than +1 per 100) ----
+# Level thresholds: triangular growth: next_level_xp = 50 * level * (level + 1)
+# Level 1 threshold = 0, Level 2 threshold = 100, Level 3 = 300, Level 4 = 600, etc.
+
+def xp_threshold_for_level(level: int) -> int:
+    # XP needed to reach this level (inclusive start)
+    # Level 1 => 0
+    if level <= 1:
+        return 0
+    return 50 * (level - 1) * level
+
 def level_from_xp(xp: int) -> int:
-    # Simple, predictable curve: every 100 XP = +1 level
-    return max(1, (xp // 100) + 1)
+    xp = max(0, xp)
+    lvl = 1
+    while True:
+        nxt = lvl + 1
+        if xp >= xp_threshold_for_level(nxt):
+            lvl = nxt
+        else:
+            return lvl
 
 def xp_to_next_level(xp: int) -> int:
-    # next threshold
-    next_lvl = level_from_xp(xp) + 1
-    next_xp = (next_lvl - 1) * 100
-    return max(0, next_xp - xp)
+    lvl = level_from_xp(xp)
+    next_xp = xp_threshold_for_level(lvl + 1)
+    return max(0, next_xp - max(0, xp))
 
 def get_session(session_id: str) -> Dict[str, Any]:
     require_db()
@@ -133,7 +147,7 @@ def update_session(session_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Failed to update session")
     return r.data[0]
 
-def fetch_chunks(board: str, class_name: str, subject: str, chapter: str, limit: int = 50) -> List[Dict[str, Any]]:
+def fetch_chunks(board: str, class_name: str, subject: str, chapter: str, limit: int = 200) -> List[Dict[str, Any]]:
     """
     Expected columns in chunks table:
       - board, class_name, subject, chapter
@@ -155,113 +169,89 @@ def fetch_chunks(board: str, class_name: str, subject: str, chapter: str, limit:
     return r.data or []
 
 def tokenize_terms(text: str) -> List[str]:
-    # Very simple term extraction: words with letters, length>=5, not pure stopwords
     stop = set([
         "therefore","because","which","where","while","these","those","their","about",
         "would","could","should","plant","plants","chapter","class","subject",
-        "between","within","using","being","through","also","more","most","some","many"
+        "between","within","using","being","through","also","more","most","some","many",
+        "there","other","another","first","second","third","later","early","after","before"
     ])
-    words = re.findall(r"[A-Za-z]{5,}", text.lower())
-    terms = []
+    words = re.findall(r"[A-Za-z]{5,}", (text or "").lower())
+    terms: List[str] = []
     for w in words:
         if w in stop:
             continue
         if w not in terms:
             terms.append(w)
-    return terms[:30]
+    return terms[:40]
 
 def pick_sentence(text: str) -> Optional[str]:
-    # pick a decent sentence
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    parts = [p.strip() for p in parts if len(p.strip()) >= 40]
+    parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+    parts = [p.strip() for p in parts if len(p.strip()) >= 50]
     if not parts:
         return None
+    # prefer first "rich" sentence
     return parts[0]
 
 def make_mcq_from_sentence(sentence: str, difficulty: int) -> Optional[Dict[str, Any]]:
-    """
-    Build MCQ by masking a key term.
-    Difficulty controls distractor similarity:
-      - easy: random distractors
-      - medium/hard: distractors look similar (same length / same suffix)
-    """
     terms = tokenize_terms(sentence)
     if not terms:
         return None
 
     correct = terms[0]
-    q = sentence
+    q_masked = re.sub(re.escape(correct), "_____", sentence, flags=re.IGNORECASE)
 
-    # mask correct term (case-insensitive)
-    q_masked = re.sub(re.escape(correct), "_____", q, flags=re.IGNORECASE)
-
-    # distractors
     pool = [t for t in terms[1:] if t != correct]
     if len(pool) < 3:
-        # fallback: create synthetic distractors
-        pool = pool + [correct[:-1] + "y", correct[:-2] + "tion", correct + "ing", "energy", "oxygen"]
-        pool = list(dict.fromkeys(pool))
+        pool = list(dict.fromkeys(pool + [
+            correct[:-1] + "y",
+            correct[:-2] + "tion" if len(correct) > 6 else correct + "tion",
+            correct + "ing",
+            "energy",
+            "oxygen",
+            "carbon",
+        ]))
 
     def similar(word: str) -> List[str]:
-        # choose distractors with similar length / suffix for harder levels
         if len(word) < 6:
             return pool[:]
         suffix = word[-3:]
         sim = [p for p in pool if len(p) >= 6 and p.endswith(suffix)]
         if len(sim) < 3:
-            # length similarity
             sim = sorted(pool, key=lambda x: abs(len(x) - len(word)))
         return sim
 
-    if difficulty < 40:
-        distractors = pool[:]
-    else:
-        distractors = similar(correct)
-
-    distractors = [d for d in distractors if d != correct]
-    distractors = distractors[:3]
+    distractors = pool[:] if difficulty < 40 else similar(correct)
+    distractors = [d for d in distractors if d != correct][:3]
 
     options = distractors + [correct]
-    # shuffle deterministically by uuid seed
     seed = uuid.uuid4().hex
     options = sorted(options, key=lambda x: (hash(seed + x) % 10000))
-    # ensure correct exists
     if correct not in options:
         options[-1] = correct
 
-    # convert to label options like "Option A" isn't useful. Use real options.
-    return {
-        "type": "mcq",
-        "q": q_masked,
-        "options": options,
-        "answer": correct,
-    }
+    return {"type": "mcq", "q": q_masked, "options": options, "answer": correct}
 
+# ---- Adaptive difficulty ----
 def adaptive_delta(correct: bool, difficulty: int) -> int:
-    """
-    Update difficulty based on performance.
-    Correct => increase; Wrong => decrease.
-    Harder difficulties move slower.
-    """
     base = 8 if difficulty < 50 else 6 if difficulty < 75 else 4
     return base if correct else -base
 
+# ---- XP rules ----
 def xp_for_answer(correct: bool, difficulty: int, streak: int) -> int:
-    """
-    XP rules:
-      - correct: base 10 * difficulty multiplier + streak bonus
-      - wrong: 0 XP (you can change to -2 if you want)
-    """
+    # participation XP on wrong to keep kids motivated
     if not correct:
-        return 0
+        return 2
+
     mult = 1.0
     if difficulty >= 75:
-        mult = 1.4
+        mult = 1.5
     elif difficulty >= 50:
         mult = 1.2
 
     streak_bonus = 0
-    if streak >= 5:
+    if streak >= 10:
+        streak_bonus = 15
+    elif streak >= 5:
         streak_bonus = 8
     elif streak >= 3:
         streak_bonus = 4
@@ -270,31 +260,24 @@ def xp_for_answer(correct: bool, difficulty: int, streak: int) -> int:
 
     return int(round(10 * mult + streak_bonus))
 
-def unlock_badges(session: Dict[str, Any], analytics: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Returns list of newly unlocked badges (objects).
-    Store badges as array of objects: [{"id":"PERFECT_5","title":"...","earned_at":"..."}]
-    """
+# ---- Badges ----
+def unlock_badges(session: Dict[str, Any], analytics: Dict[str, Any], level_up: bool) -> List[Dict[str, Any]]:
     existing = session.get("badges") or []
     existing_ids = set([b.get("id") for b in existing if isinstance(b, dict)])
 
     new_badges: List[Dict[str, Any]] = []
+
     def add(bid: str, title: str, desc: str):
         if bid in existing_ids:
             return
-        new_badges.append({
-            "id": bid,
-            "title": title,
-            "desc": desc,
-            "earned_at": now_iso(),
-        })
+        new_badges.append({"id": bid, "title": title, "desc": desc, "earned_at": now_iso()})
 
-    # Badge logic
     total = safe_int(analytics.get("quiz_total"), 0)
     correct = safe_int(analytics.get("quiz_correct"), 0)
     wrong = safe_int(analytics.get("quiz_wrong"), 0)
-    streak = safe_int(analytics.get("streak"), 0)
     best_streak = safe_int(analytics.get("best_streak"), 0)
+    xp_total = safe_int(session.get("xp"), 0)
+    level = safe_int(session.get("level"), 1)
 
     if total >= 1:
         add("FIRST_QUIZ", "First Quiz!", "You attempted your first quiz.")
@@ -304,15 +287,21 @@ def unlock_badges(session: Dict[str, Any], analytics: Dict[str, Any]) -> List[Di
         add("STREAK_3", "Hot Streak", "3 correct answers in a row.")
     if best_streak >= 5:
         add("STREAK_5", "Unstoppable", "5 correct answers in a row.")
+    if best_streak >= 10:
+        add("STREAK_10", "Legend Streak", "10 correct answers in a row.")
     if correct >= 10:
         add("TEN_CORRECT", "Sharp Mind", "10 correct answers total.")
+    if xp_total >= 250:
+        add("XP_250", "XP Booster", "You earned 250 XP.")
+    if xp_total >= 1000:
+        add("XP_1000", "XP Master", "You earned 1000 XP.")
+    if level_up:
+        add("LEVEL_UP", "Level Up!", f"You reached Level {level}.")
 
     return new_badges
 
+# ---- Session struct defaults ----
 def ensure_session_struct(session: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Returns (analytics, quiz_state) with defaults.
-    """
     analytics = session.get("analytics") or {}
     if not isinstance(analytics, dict):
         analytics = {}
@@ -326,15 +315,56 @@ def ensure_session_struct(session: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     analytics.setdefault("quiz_wrong", safe_int(session.get("score_wrong"), 0))
     analytics.setdefault("streak", 0)
     analytics.setdefault("best_streak", 0)
-    analytics.setdefault("last_answer_at", None)
+    analytics.setdefault("answers", [])   # list[dict]
     analytics.setdefault("quiz_started_at", None)
     analytics.setdefault("quiz_finished_at", None)
-    analytics.setdefault("answers", [])  # list of {question_id, correct, given, expected, ts, difficulty}
 
-    quiz_state.setdefault("questions", [])  # list of stored questions with answers
+    quiz_state.setdefault("attempt_id", None)
+    quiz_state.setdefault("questions", [])     # stored questions with answers
     quiz_state.setdefault("active", False)
+    quiz_state.setdefault("target_count", None)
 
     return analytics, quiz_state
+
+def compute_session_analytics(session: Dict[str, Any]) -> Dict[str, Any]:
+    analytics = session.get("analytics") or {}
+    if not isinstance(analytics, dict):
+        analytics = {}
+    answers = analytics.get("answers") or []
+    if not isinstance(answers, list):
+        answers = []
+
+    total = safe_int(session.get("score_total"), 0)
+    correct = safe_int(session.get("score_correct"), 0)
+    wrong = safe_int(session.get("score_wrong"), 0)
+    acc = (correct / total * 100.0) if total > 0 else 0.0
+
+    diffs: List[int] = []
+    xp_earned_total = 0
+    for a in answers:
+        if not isinstance(a, dict):
+            continue
+        diffs.append(safe_int(a.get("difficulty"), 0))
+        xp_earned_total += safe_int(a.get("xp_earned"), 0)
+
+    avg_diff = (sum(diffs) / len(diffs)) if diffs else safe_int(session.get("quiz_difficulty"), 50)
+
+    return {
+        "score": {"total": total, "correct": correct, "wrong": wrong, "accuracy": round(acc, 1)},
+        "streak": safe_int(analytics.get("streak"), 0),
+        "best_streak": safe_int(analytics.get("best_streak"), 0),
+        "avg_difficulty": round(avg_diff, 1),
+        "xp": {
+            "total": safe_int(session.get("xp"), 0),
+            "level": safe_int(session.get("level"), 1),
+            "to_next_level": xp_to_next_level(safe_int(session.get("xp"), 0)),
+            "earned_in_quiz": xp_earned_total,
+        },
+        "badges_count": len(session.get("badges") or []),
+        "quiz_started_at": analytics.get("quiz_started_at"),
+        "quiz_finished_at": analytics.get("quiz_finished_at"),
+        "attempt_id": (session.get("quiz_state") or {}).get("attempt_id"),
+    }
 
 # ─────────────────────────────────────────────────────────────
 # Routes
@@ -347,7 +377,6 @@ def health():
 @app.get("/debug/status")
 def debug_status():
     require_db()
-    # quick table checks
     out = {"ok": True, "supabase": "connected", "tables": {}}
     for t in ["sessions", "chunks", "messages"]:
         try:
@@ -378,7 +407,7 @@ def session_start(body: StartSessionIn):
         "xp": 0,
         "level": 1,
         "badges": [],
-        "quiz_difficulty": 50,
+        "quiz_difficulty": 50,  # adaptive baseline
         "analytics": {},
         "quiz_state": {},
         "created_at": now_iso(),
@@ -399,15 +428,13 @@ def session_get(session_id: str):
 @app.post("/respond", response_model=RespondOut)
 def respond(body: RespondIn):
     """
-    Minimal teaching flow (kept simple).
-    You already have your teaching logic working; this keeps compatibility.
+    Minimal teaching flow (kept simple + compatible).
     """
     s = get_session(body.session_id)
 
     stage = s.get("stage") or "INTRO"
     intro_done = bool(s.get("intro_done"))
 
-    # If intro not done, guide student
     if not intro_done:
         text = (body.text or "").strip().lower()
         if not text:
@@ -419,24 +446,21 @@ def respond(body: RespondIn):
             teacher_text = "Awesome. Let’s start! Listen carefully — you can press the mic anytime to ask a question."
             return RespondOut(ok=True, session_id=body.session_id, stage="TEACHING", teacher_text=teacher_text, action="NEXT_CHUNK", meta={"intro_complete": True})
 
-        # treat as name
         update_session(body.session_id, {"student_name": body.text.strip()})
         teacher_text = f"Nice to meet you, {body.text.strip()} 😊\nWhen you’re ready, say: **yes**."
         return RespondOut(ok=True, session_id=body.session_id, stage="INTRO", teacher_text=teacher_text, action="WAIT_FOR_STUDENT", meta={})
 
-    # Teaching: serve a chunk line-by-line
     if stage != "TEACHING":
-        # keep stage if quiz etc.
         teacher_text = "We are not in TEACHING mode right now."
         return RespondOut(ok=True, session_id=body.session_id, stage=stage, teacher_text=teacher_text, action="NOOP", meta={})
 
     chunks = fetch_chunks(s["board"], s["class_name"], s["subject"], s["chapter"], limit=200)
     idx = safe_int(s.get("chunk_index"), 0)
     if idx >= len(chunks):
-        teacher_text = "Chapter done ✅ Want a quiz now?"
+        teacher_text = "Chapter done ✅ Want a quiz now? (Call /quiz/start)"
         return RespondOut(ok=True, session_id=body.session_id, stage="TEACHING", teacher_text=teacher_text, action="CHAPTER_DONE", meta={"done": True})
 
-    chunk_text = chunks[idx].get("text", "").strip()
+    chunk_text = (chunks[idx].get("text", "") or "").strip()
     update_session(body.session_id, {"chunk_index": idx + 1})
     return RespondOut(
         ok=True,
@@ -452,15 +476,23 @@ def quiz_start(body: QuizStartIn):
     s = get_session(body.session_id)
     analytics, quiz_state = ensure_session_struct(s)
 
-    # build question bank from chunks
     chunks = fetch_chunks(s["board"], s["class_name"], s["subject"], s["chapter"], limit=200)
     if not chunks:
         raise HTTPException(status_code=400, detail="No chunks found for this chapter. Add content first.")
 
+    # NEW attempt id each quiz start
+    attempt_id = str(uuid.uuid4())
+
+    # Reset per-quiz analytics fields (keep cumulative score/xp in session as you already do)
+    analytics["quiz_started_at"] = now_iso()
+    analytics["quiz_finished_at"] = None
+    analytics["streak"] = 0
+    analytics["best_streak"] = 0
+    analytics["answers"] = []
+
     difficulty = clamp(safe_int(s.get("quiz_difficulty", 50), 50), 0, 100)
 
-    # Create questions
-    questions_with_answers = []
+    questions_with_answers: List[Dict[str, Any]] = []
     for c in chunks:
         sent = pick_sentence(c.get("text", "") or "")
         if not sent:
@@ -475,9 +507,8 @@ def quiz_start(body: QuizStartIn):
     if len(questions_with_answers) < 1:
         raise HTTPException(status_code=400, detail="Could not generate quiz questions from content.")
 
-    # store with ids
-    stored = []
-    public = []
+    stored: List[Dict[str, Any]] = []
+    public: List[Dict[str, Any]] = []
     for qa in questions_with_answers:
         qid = str(uuid.uuid4())
         stored.append({
@@ -485,7 +516,7 @@ def quiz_start(body: QuizStartIn):
             "type": qa["type"],
             "q": qa["q"],
             "options": qa["options"],
-            "answer": qa["answer"],   # stored only on server
+            "answer": qa["answer"],  # server-only
         })
         public.append({
             "question_id": qid,
@@ -494,22 +525,28 @@ def quiz_start(body: QuizStartIn):
             "options": qa["options"],
         })
 
+    quiz_state["attempt_id"] = attempt_id
     quiz_state["questions"] = stored
     quiz_state["active"] = True
+    quiz_state["target_count"] = body.count
 
-    analytics["quiz_started_at"] = analytics.get("quiz_started_at") or now_iso()
-
-    # set stage QUIZ
     patch = {
         "stage": "QUIZ",
         "quiz_state": quiz_state,
         "analytics": analytics,
-        "quiz_started_at": datetime.now(timezone.utc).isoformat(),
+        "quiz_started_at": analytics["quiz_started_at"],
         "quiz_finished_at": None,
     }
     update_session(body.session_id, patch)
 
-    return {"ok": True, "session_id": body.session_id, "stage": "QUIZ", "difficulty": difficulty, "questions": public}
+    return {
+        "ok": True,
+        "session_id": body.session_id,
+        "stage": "QUIZ",
+        "attempt_id": attempt_id,
+        "difficulty": difficulty,
+        "questions": public,
+    }
 
 @app.post("/quiz/answer")
 def quiz_answer(body: QuizAnswerIn):
@@ -519,32 +556,41 @@ def quiz_answer(body: QuizAnswerIn):
 
     analytics, quiz_state = ensure_session_struct(s)
 
+    if not quiz_state.get("active"):
+        raise HTTPException(status_code=400, detail="Quiz is not active. Call /quiz/start again.")
+
     questions = quiz_state.get("questions") or []
     q = next((x for x in questions if x.get("question_id") == body.question_id), None)
     if not q:
         raise HTTPException(status_code=400, detail="Invalid question_id")
 
+    answers = analytics.get("answers") or []
+    if not isinstance(answers, list):
+        answers = []
+
+    # Prevent double-answering same question (important for clean analytics + fair XP)
+    if any(isinstance(a, dict) and a.get("question_id") == body.question_id for a in answers):
+        raise HTTPException(status_code=409, detail="This question is already answered.")
+
     expected = (q.get("answer") or "").strip()
     given = (body.answer or "").strip()
 
-    # accept either exact text match OR option index match
     correct = False
     if given.lower() == expected.lower():
         correct = True
     else:
-        # If user sent option number "1" etc., map to options
         if given.isdigit():
             i = int(given) - 1
             opts = q.get("options") or []
             if 0 <= i < len(opts) and str(opts[i]).strip().lower() == expected.lower():
                 correct = True
 
-    # Score update
+    # Update score counters (cumulative, as your current system does)
     score_total = safe_int(s.get("score_total"), 0) + 1
     score_correct = safe_int(s.get("score_correct"), 0) + (1 if correct else 0)
     score_wrong = safe_int(s.get("score_wrong"), 0) + (0 if correct else 1)
 
-    # Streak analytics
+    # Streak
     streak = safe_int(analytics.get("streak"), 0)
     best_streak = safe_int(analytics.get("best_streak"), 0)
     if correct:
@@ -552,7 +598,6 @@ def quiz_answer(body: QuizAnswerIn):
         best_streak = max(best_streak, streak)
     else:
         streak = 0
-
     analytics["streak"] = streak
     analytics["best_streak"] = best_streak
 
@@ -561,15 +606,16 @@ def quiz_answer(body: QuizAnswerIn):
     difficulty = clamp(difficulty + adaptive_delta(correct, difficulty), 0, 100)
 
     # XP + Level
-    xp = safe_int(s.get("xp"), 0)
+    xp_old = safe_int(s.get("xp"), 0)
+    level_old = safe_int(s.get("level"), 1)
+
     earned = xp_for_answer(correct, difficulty=difficulty, streak=streak)
-    xp_new = xp + earned
+    xp_new = max(0, xp_old + earned)
     level_new = level_from_xp(xp_new)
 
-    # Detailed analytics record
-    answers = analytics.get("answers") or []
-    if not isinstance(answers, list):
-        answers = []
+    level_up = level_new > level_old
+
+    # Append answer analytics
     answers.append({
         "question_id": body.question_id,
         "correct": correct,
@@ -580,21 +626,20 @@ def quiz_answer(body: QuizAnswerIn):
         "xp_earned": earned,
     })
     analytics["answers"] = answers
-
     analytics["quiz_total"] = score_total
     analytics["quiz_correct"] = score_correct
     analytics["quiz_wrong"] = score_wrong
-    analytics["last_answer_at"] = now_iso()
 
-    # Badge unlocking
-    new_badges = unlock_badges({**s, "badges": s.get("badges")}, analytics)
-    badges = s.get("badges") or []
-    if not isinstance(badges, list):
-        badges = []
-    badges = badges + new_badges
+    # Badges
+    current_badges = s.get("badges") or []
+    if not isinstance(current_badges, list):
+        current_badges = []
+    # Pass session snapshot with updated xp/level so rules see new totals
+    session_for_badges = {**s, "xp": xp_new, "level": level_new, "badges": current_badges}
+    new_badges = unlock_badges(session_for_badges, analytics, level_up=level_up)
+    badges = current_badges + new_badges
 
-    # Quiz complete?
-    # If student answered all questions generated in /quiz/start, auto-finish.
+    # Quiz completion (all questions of this attempt answered)
     answered_ids = set([a.get("question_id") for a in answers if isinstance(a, dict)])
     question_ids = set([qq.get("question_id") for qq in questions if isinstance(qq, dict)])
     quiz_complete = len(question_ids) > 0 and question_ids.issubset(answered_ids)
@@ -612,11 +657,14 @@ def quiz_answer(body: QuizAnswerIn):
     }
 
     if quiz_complete:
-        patch["quiz_finished_at"] = now_iso()
-        analytics["quiz_finished_at"] = patch["quiz_finished_at"]
-        patch["analytics"] = analytics
+        finished_at = now_iso()
+        analytics["quiz_finished_at"] = finished_at
         quiz_state["active"] = False
+        patch["analytics"] = analytics
         patch["quiz_state"] = quiz_state
+        patch["quiz_finished_at"] = finished_at
+        # keep stage as QUIZ (so UI doesn’t break) but you can switch to QUIZ_DONE if you want:
+        patch["stage"] = "QUIZ"
 
     update_session(body.session_id, patch)
 
@@ -624,13 +672,13 @@ def quiz_answer(body: QuizAnswerIn):
         "ok": True,
         "session_id": body.session_id,
         "correct": correct,
-        "expected": expected if correct is False else None,  # optional
+        "expected": expected if not correct else None,
         "score": {"total": score_total, "correct": score_correct, "wrong": score_wrong},
-        "xp": {"earned": earned, "total": xp_new, "level": level_new, "to_next_level": xp_to_next_level(xp_new)},
+        "xp": {"earned": earned, "total": xp_new, "level": level_new, "to_next_level": xp_to_next_level(xp_new), "level_up": level_up},
         "difficulty": difficulty,
         "badges_unlocked": new_badges,
         "quiz_complete": quiz_complete,
-        "stage": "QUIZ" if not quiz_complete else "QUIZ_DONE",
+        "stage": "QUIZ",
     }
 
 @app.get("/quiz/score/{session_id}")
@@ -653,6 +701,38 @@ def quiz_score(session_id: str):
         "stage": s.get("stage"),
     }
 
+@app.get("/analytics/session/{session_id}")
+def analytics_session(session_id: str):
+    s = get_session(session_id)
+    return {"ok": True, "session_id": session_id, "analytics": compute_session_analytics(s), "session_meta": {
+        "board": s.get("board"),
+        "class_name": s.get("class_name"),
+        "subject": s.get("subject"),
+        "chapter": s.get("chapter"),
+        "language": s.get("language"),
+        "stage": s.get("stage"),
+    }}
+
+@app.get("/report/json/{session_id}")
+def report_json(session_id: str):
+    s = get_session(session_id)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "session": {
+            "board": s.get("board"),
+            "class_name": s.get("class_name"),
+            "subject": s.get("subject"),
+            "chapter": s.get("chapter"),
+            "language": s.get("language"),
+            "created_at": s.get("created_at"),
+            "updated_at": s.get("updated_at"),
+        },
+        "analytics": compute_session_analytics(s),
+        "badges": s.get("badges") or [],
+        "raw_answers": (s.get("analytics") or {}).get("answers") if isinstance(s.get("analytics"), dict) else [],
+    }
+
 @app.get("/report/pdf/{session_id}")
 def report_pdf(session_id: str):
     """
@@ -667,8 +747,8 @@ def report_pdf(session_id: str):
     analytics = s.get("analytics") or {}
     if not isinstance(analytics, dict):
         analytics = {}
+    computed = compute_session_analytics(s)
 
-    # Create PDF bytes
     from io import BytesIO
     buff = BytesIO()
     c = canvas.Canvas(buff, pagesize=A4)
@@ -682,56 +762,53 @@ def report_pdf(session_id: str):
     write_line(2 * cm, y, "GurukulAI Session Report", 16); y -= 1.0 * cm
     write_line(2 * cm, y, f"Session ID: {session_id}", 10); y -= 0.6 * cm
     write_line(2 * cm, y, f"Created: {s.get('created_at', '-')}", 10); y -= 0.6 * cm
+    write_line(2 * cm, y, f"Updated: {s.get('updated_at', '-')}", 10); y -= 0.8 * cm
 
-    y -= 0.4 * cm
     write_line(2 * cm, y, "Class Details", 13); y -= 0.8 * cm
     write_line(2 * cm, y, f"Board: {s.get('board','-')}   Class: {s.get('class_name','-')}   Subject: {s.get('subject','-')}", 11); y -= 0.6 * cm
-    write_line(2 * cm, y, f"Chapter: {s.get('chapter','-')}   Language: {s.get('language','-')}", 11); y -= 0.8 * cm
+    write_line(2 * cm, y, f"Chapter: {s.get('chapter','-')}   Language: {s.get('language','-')}", 11); y -= 0.9 * cm
 
     write_line(2 * cm, y, "Performance", 13); y -= 0.8 * cm
-    total = safe_int(s.get("score_total"), 0)
-    correct = safe_int(s.get("score_correct"), 0)
-    wrong = safe_int(s.get("score_wrong"), 0)
-    acc = (correct / total * 100.0) if total > 0 else 0.0
-    write_line(2 * cm, y, f"Quiz Score: {correct}/{total} (Wrong: {wrong})   Accuracy: {acc:.1f}%", 11); y -= 0.7 * cm
+    sc = computed["score"]
+    write_line(2 * cm, y, f"Quiz Score: {sc['correct']}/{sc['total']} (Wrong: {sc['wrong']})   Accuracy: {sc['accuracy']}%", 11); y -= 0.7 * cm
 
-    xp = safe_int(s.get("xp"), 0)
-    level = safe_int(s.get("level"), 1)
-    write_line(2 * cm, y, f"XP: {xp}   Level: {level}   XP to next level: {xp_to_next_level(xp)}", 11); y -= 0.9 * cm
+    xpinfo = computed["xp"]
+    write_line(2 * cm, y, f"XP: {xpinfo['total']}   Level: {xpinfo['level']}   XP to next level: {xpinfo['to_next_level']}", 11); y -= 0.7 * cm
+    write_line(2 * cm, y, f"Avg quiz difficulty: {computed['avg_difficulty']} / 100", 11); y -= 0.7 * cm
+    write_line(2 * cm, y, f"Best streak: {computed['best_streak']}", 11); y -= 0.9 * cm
 
-    difficulty = safe_int(s.get("quiz_difficulty"), 50)
-    write_line(2 * cm, y, f"Adaptive Difficulty (final): {difficulty}/100", 11); y -= 0.9 * cm
+    write_line(2 * cm, y, "Quiz Timing", 13); y -= 0.8 * cm
+    write_line(2 * cm, y, f"Quiz started: {computed.get('quiz_started_at') or '-'}", 10); y -= 0.5 * cm
+    write_line(2 * cm, y, f"Quiz finished: {computed.get('quiz_finished_at') or '-'}", 10); y -= 0.9 * cm
 
     write_line(2 * cm, y, "Badges", 13); y -= 0.8 * cm
     badges = s.get("badges") or []
     if not badges:
         write_line(2 * cm, y, "No badges earned yet.", 11); y -= 0.6 * cm
     else:
-        for b in badges[:8]:
-            title = b.get("title") if isinstance(b, dict) else str(b)
-            desc = b.get("desc") if isinstance(b, dict) else ""
-            write_line(2 * cm, y, f"• {title} — {desc}", 10); y -= 0.5 * cm
+        for b in badges[:10]:
+            if not isinstance(b, dict):
+                write_line(2 * cm, y, f"• {str(b)}", 10); y -= 0.5 * cm
+            else:
+                title = b.get("title") or b.get("id") or "Badge"
+                desc = b.get("desc") or ""
+                write_line(2 * cm, y, f"• {title} — {desc}", 10); y -= 0.5 * cm
             if y < 2 * cm:
                 c.showPage()
                 y = h - 2 * cm
 
     y -= 0.4 * cm
-    write_line(2 * cm, y, "Analytics (Highlights)", 13); y -= 0.8 * cm
-    write_line(2 * cm, y, f"Best streak: {safe_int(analytics.get('best_streak'), 0)}", 11); y -= 0.6 * cm
-    write_line(2 * cm, y, f"Quiz started: {analytics.get('quiz_started_at','-')}", 10); y -= 0.5 * cm
-    write_line(2 * cm, y, f"Quiz finished: {analytics.get('quiz_finished_at','-')}", 10); y -= 0.8 * cm
-
-    # Add last 5 answers
     answers = analytics.get("answers") or []
     if isinstance(answers, list) and answers:
-        write_line(2 * cm, y, "Last Answers", 12); y -= 0.7 * cm
-        for a in answers[-5:]:
+        write_line(2 * cm, y, "Recent Answers", 12); y -= 0.7 * cm
+        for a in answers[-8:]:
             if not isinstance(a, dict):
                 continue
-            qid = a.get("question_id", "-")
             ok = "✅" if a.get("correct") else "❌"
             earned = a.get("xp_earned", 0)
-            write_line(2 * cm, y, f"{ok} {qid[:8]}…   XP +{earned}   diff {a.get('difficulty','-')}", 10)
+            diff = a.get("difficulty", "-")
+            qid = (a.get("question_id", "") or "")[:8]
+            write_line(2 * cm, y, f"{ok} {qid}…   XP +{earned}   diff {diff}", 10)
             y -= 0.5 * cm
             if y < 2 * cm:
                 c.showPage()
