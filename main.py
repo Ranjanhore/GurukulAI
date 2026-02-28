@@ -104,10 +104,8 @@ def safe_int(v: Any, default: int = 0) -> int:
 def clamp(n: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, n))
 
-# ---- XP / Levels ----
-# Level thresholds: triangular growth: next_level_xp = 50 * level * (level + 1)
-# Level 1 threshold = 0, Level 2 threshold = 100, Level 3 = 300, Level 4 = 600, etc.
-
+# ---- XP / Levels (triangular growth) ----
+# Level 1 threshold = 0, Level 2 = 100, Level 3 = 300, Level 4 = 600, ...
 def xp_threshold_for_level(level: int) -> int:
     if level <= 1:
         return 0
@@ -150,32 +148,39 @@ def fetch_chunks(
     class_name: str,
     subject: str,
     chapter: str,
-    kind: Optional[str] = None,
-    limit: int = 400
+    kind: str,
+    limit: int = 400,
 ) -> List[Dict[str, Any]]:
     """
-    chunks table expected columns:
-      - board, class_name, subject, chapter, kind, idx, text
+    chunks table (based on your screenshot):
+      - board (text) NOT NULL
+      - class_name (text) NOT NULL
+      - subject (text) NOT NULL
+      - chapter (text) NOT NULL
+      - kind (text) NOT NULL   <-- IMPORTANT: INTRO / TEACH
+      - idx (int) NOT NULL
+      - text (text) NOT NULL
+    PK: (board, class_name, subject, chapter, kind, idx)
     """
     require_db()
-    q = (
+    r = (
         sb.table("chunks")
         .select("*")
         .eq("board", board)
         .eq("class_name", class_name)
         .eq("subject", subject)
         .eq("chapter", chapter)
-    )
-    if kind:
-        q = q.eq("kind", kind)
-
-    r = (
-        q.order("idx", desc=False)
-         .limit(limit)
-         .execute()
+        .eq("kind", kind)
+        .order("idx", desc=False)
+        .limit(limit)
+        .execute()
     )
     return r.data or []
 
+def normalize_student_text(text: str) -> str:
+    return (text or "").strip()
+
+# ---- Quiz helpers ----
 def tokenize_terms(text: str) -> List[str]:
     stop = set([
         "therefore","because","which","where","while","these","those","their","about",
@@ -195,15 +200,12 @@ def tokenize_terms(text: str) -> List[str]:
 def pick_sentence(text: str) -> Optional[str]:
     parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
     parts = [p.strip() for p in parts if len(p.strip()) >= 50]
-    if not parts:
-        return None
-    return parts[0]
+    return parts[0] if parts else None
 
 def make_mcq_from_sentence(sentence: str, difficulty: int) -> Optional[Dict[str, Any]]:
     terms = tokenize_terms(sentence)
     if not terms:
         return None
-
     correct = terms[0]
     q_masked = re.sub(re.escape(correct), "_____", sentence, flags=re.IGNORECASE)
 
@@ -213,9 +215,7 @@ def make_mcq_from_sentence(sentence: str, difficulty: int) -> Optional[Dict[str,
             correct[:-1] + "y",
             correct[:-2] + "tion" if len(correct) > 6 else correct + "tion",
             correct + "ing",
-            "energy",
-            "oxygen",
-            "carbon",
+            "energy", "oxygen", "carbon",
         ]))
 
     def similar(word: str) -> List[str]:
@@ -244,8 +244,7 @@ def adaptive_delta(correct: bool, difficulty: int) -> int:
 
 def xp_for_answer(correct: bool, difficulty: int, streak: int) -> int:
     if not correct:
-        return 2
-
+        return 2  # tiny motivation XP
     mult = 1.0
     if difficulty >= 75:
         mult = 1.5
@@ -263,6 +262,45 @@ def xp_for_answer(correct: bool, difficulty: int, streak: int) -> int:
         streak_bonus = 2
 
     return int(round(10 * mult + streak_bonus))
+
+def unlock_badges(session: Dict[str, Any], analytics: Dict[str, Any], level_up: bool) -> List[Dict[str, Any]]:
+    existing = session.get("badges") or []
+    existing_ids = set([b.get("id") for b in existing if isinstance(b, dict)])
+
+    new_badges: List[Dict[str, Any]] = []
+
+    def add(bid: str, title: str, desc: str):
+        if bid in existing_ids:
+            return
+        new_badges.append({"id": bid, "title": title, "desc": desc, "earned_at": now_iso()})
+
+    total = safe_int(analytics.get("quiz_total"), 0)
+    correct = safe_int(analytics.get("quiz_correct"), 0)
+    wrong = safe_int(analytics.get("quiz_wrong"), 0)
+    best_streak = safe_int(analytics.get("best_streak"), 0)
+    xp_total = safe_int(session.get("xp"), 0)
+    level = safe_int(session.get("level"), 1)
+
+    if total >= 1:
+        add("FIRST_QUIZ", "First Quiz!", "You attempted your first quiz.")
+    if total >= 5 and wrong == 0:
+        add("PERFECT_5", "Perfect Score", "You got 5/5 correct.")
+    if best_streak >= 3:
+        add("STREAK_3", "Hot Streak", "3 correct answers in a row.")
+    if best_streak >= 5:
+        add("STREAK_5", "Unstoppable", "5 correct answers in a row.")
+    if best_streak >= 10:
+        add("STREAK_10", "Legend Streak", "10 correct answers in a row.")
+    if correct >= 10:
+        add("TEN_CORRECT", "Sharp Mind", "10 correct answers total.")
+    if xp_total >= 250:
+        add("XP_250", "XP Booster", "You earned 250 XP.")
+    if xp_total >= 1000:
+        add("XP_1000", "XP Master", "You earned 1000 XP.")
+    if level_up:
+        add("LEVEL_UP", "Level Up!", f"You reached Level {level}.")
+
+    return new_badges
 
 def ensure_session_struct(session: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     analytics = session.get("analytics") or {}
@@ -329,45 +367,6 @@ def compute_session_analytics(session: Dict[str, Any]) -> Dict[str, Any]:
         "attempt_id": (session.get("quiz_state") or {}).get("attempt_id"),
     }
 
-def unlock_badges(session: Dict[str, Any], analytics: Dict[str, Any], level_up: bool) -> List[Dict[str, Any]]:
-    existing = session.get("badges") or []
-    existing_ids = set([b.get("id") for b in existing if isinstance(b, dict)])
-
-    new_badges: List[Dict[str, Any]] = []
-
-    def add(bid: str, title: str, desc: str):
-        if bid in existing_ids:
-            return
-        new_badges.append({"id": bid, "title": title, "desc": desc, "earned_at": now_iso()})
-
-    total = safe_int(analytics.get("quiz_total"), 0)
-    correct = safe_int(analytics.get("quiz_correct"), 0)
-    wrong = safe_int(analytics.get("quiz_wrong"), 0)
-    best_streak = safe_int(analytics.get("best_streak"), 0)
-    xp_total = safe_int(session.get("xp"), 0)
-    level = safe_int(session.get("level"), 1)
-
-    if total >= 1:
-        add("FIRST_QUIZ", "First Quiz!", "You attempted your first quiz.")
-    if total >= 5 and wrong == 0:
-        add("PERFECT_5", "Perfect Score", "You got 5/5 correct.")
-    if best_streak >= 3:
-        add("STREAK_3", "Hot Streak", "3 correct answers in a row.")
-    if best_streak >= 5:
-        add("STREAK_5", "Unstoppable", "5 correct answers in a row.")
-    if best_streak >= 10:
-        add("STREAK_10", "Legend Streak", "10 correct answers in a row.")
-    if correct >= 10:
-        add("TEN_CORRECT", "Sharp Mind", "10 correct answers total.")
-    if xp_total >= 250:
-        add("XP_250", "XP Booster", "You earned 250 XP.")
-    if xp_total >= 1000:
-        add("XP_1000", "XP Master", "You earned 1000 XP.")
-    if level_up:
-        add("LEVEL_UP", "Level Up!", f"You reached Level {level}.")
-
-    return new_badges
-
 # ─────────────────────────────────────────────────────────────
 # Routes
 # ─────────────────────────────────────────────────────────────
@@ -380,7 +379,7 @@ def health():
 def debug_status():
     require_db()
     out = {"ok": True, "supabase": "connected", "tables": {}}
-    for t in ["sessions", "chunks", "messages"]:
+    for t in ["sessions", "chunks", "messages", "chapters"]:
         try:
             sb.table(t).select("*").limit(1).execute()
             out["tables"][t] = "ok"
@@ -402,8 +401,7 @@ def session_start(body: StartSessionIn):
         "language": body.language,
         "stage": "INTRO",
         "intro_done": False,
-        "intro_index": 0,     # ✅ intro chunk pointer
-        "chunk_index": 0,     # ✅ teaching chunk pointer
+        "chunk_index": 1,  # 1-based idx in your chunks table is common; change to 0 if yours is 0-based
         "score_correct": 0,
         "score_wrong": 0,
         "score_total": 0,
@@ -431,16 +429,16 @@ def session_get(session_id: str):
 @app.post("/respond", response_model=RespondOut)
 def respond(body: RespondIn):
     """
-    Flow:
-      INTRO:
-        - serve INTRO chunks (kind='INTRO') using intro_index
-        - if student provides name -> store
-        - if student says "yes" -> intro_done=True, stage=TEACHING, reset chunk_index
-      TEACHING:
-        - serve TEACH chunks (kind='TEACH') using chunk_index
+    INTRO:
+      - If text empty => serve INTRO chunk #1 (if exists) else default intro
+      - If student gives name => store and ask to say "yes"
+      - If student says yes => intro_done=True, stage=TEACHING and start TEACH chunks
+
+    TEACHING:
+      - If text empty => serve next TEACH chunk by chunk_index
+      - If text present => answer briefly + continue with TEACH chunks (simple)
     """
     s = get_session(body.session_id)
-
     stage = (s.get("stage") or "INTRO").upper()
     intro_done = bool(s.get("intro_done"))
 
@@ -449,60 +447,57 @@ def respond(body: RespondIn):
     subject = s.get("subject")
     chapter = s.get("chapter")
 
-    # ---------- INTRO ----------
-    if not intro_done:
-        text_in = (body.text or "").strip()
-        text_l = text_in.lower()
+    student_text = normalize_student_text(body.text)
 
-        # If student says yes -> move to TEACHING
-        if text_in and "yes" in text_l:
-            update_session(body.session_id, {
-                "intro_done": True,
-                "stage": "TEACHING",
-                "chunk_index": 0,
-            })
+    # ---------------- INTRO ----------------
+    if not intro_done:
+        # If empty -> serve INTRO chunk 1 if exists
+        if not student_text:
+            intro_chunks = fetch_chunks(board, class_name, subject, chapter, kind="INTRO", limit=50)
+            if intro_chunks:
+                first = (intro_chunks[0].get("text") or "").strip()
+                if first:
+                    return RespondOut(
+                        ok=True,
+                        session_id=body.session_id,
+                        stage="INTRO",
+                        teacher_text=first,
+                        action="INTRO_CHUNK",
+                        meta={"kind": "INTRO", "idx": intro_chunks[0].get("idx")},
+                    )
+
+            # fallback default if no intro chunks
+            teacher_text = (
+                "Hi! I’m your GurukulAI teacher 😊\n"
+                "What’s your name?\n"
+                "When you’re ready, say: **yes**."
+            )
+            return RespondOut(ok=True, session_id=body.session_id, stage="INTRO", teacher_text=teacher_text, action="WAIT_FOR_STUDENT")
+
+        low = student_text.lower()
+
+        if "yes" in low:
+            update_session(body.session_id, {"intro_done": True, "stage": "TEACHING", "chunk_index": 1})
             return RespondOut(
                 ok=True,
                 session_id=body.session_id,
                 stage="TEACHING",
-                teacher_text="Awesome. Let’s start! Listen carefully — press the mic anytime to ask a question.",
-                action="NEXT_CHUNK",
+                teacher_text="Awesome. Let’s start our story lesson now! Listen carefully — you can press the mic anytime to ask a question.",
+                action="INTRO_COMPLETE",
                 meta={"intro_complete": True},
             )
 
-        # If they typed something and it's not yes -> treat as name (simple)
-        if text_in and "yes" not in text_l:
-            update_session(body.session_id, {"student_name": text_in})
-            return RespondOut(
-                ok=True,
-                session_id=body.session_id,
-                stage="INTRO",
-                teacher_text=f"Nice to meet you, {text_in} 😊\nWhen you’re ready, say: **yes**.",
-                action="WAIT_FOR_STUDENT",
-                meta={},
-            )
+        # treat as name
+        update_session(body.session_id, {"student_name": student_text})
+        return RespondOut(
+            ok=True,
+            session_id=body.session_id,
+            stage="INTRO",
+            teacher_text=f"Nice to meet you, {student_text} 😊\nWhen you’re ready, say: **yes**.",
+            action="GOT_NAME",
+        )
 
-        # No text => serve INTRO chunk sequence (if exists)
-        intro_chunks = fetch_chunks(board, class_name, subject, chapter, kind="INTRO", limit=50)
-        intro_i = safe_int(s.get("intro_index"), 0)
-
-        if intro_chunks and intro_i < len(intro_chunks):
-            chunk_text = (intro_chunks[intro_i].get("text") or "").strip()
-            update_session(body.session_id, {"intro_index": intro_i + 1})
-            return RespondOut(
-                ok=True,
-                session_id=body.session_id,
-                stage="INTRO",
-                teacher_text=chunk_text if chunk_text else "Welcome! 😊",
-                action="SPEAK",
-                meta={"kind": "INTRO", "idx": intro_i + 1, "intro_remaining": max(0, len(intro_chunks) - (intro_i + 1))},
-            )
-
-        # Fallback if no INTRO chunks present
-        teacher_text = "Hi! I’m your GurukulAI teacher 😊\nWhat’s your name?\nWhen you’re ready, say: **yes**."
-        return RespondOut(ok=True, session_id=body.session_id, stage="INTRO", teacher_text=teacher_text, action="WAIT_FOR_STUDENT", meta={"intro_fallback": True})
-
-    # ---------- If not TEACHING, do nothing ----------
+    # ---------------- TEACHING ----------------
     if stage != "TEACHING":
         return RespondOut(
             ok=True,
@@ -510,27 +505,56 @@ def respond(body: RespondIn):
             stage=stage,
             teacher_text="We are not in TEACHING mode right now.",
             action="NOOP",
-            meta={},
         )
 
-    # ---------- TEACHING: serve TEACH chunks ----------
-    teach_chunks = fetch_chunks(board, class_name, subject, chapter, kind="TEACH", limit=500)
+    teach_chunks = fetch_chunks(board, class_name, subject, chapter, kind="TEACH", limit=600)
+
     if not teach_chunks:
         return RespondOut(
             ok=True,
             session_id=body.session_id,
             stage="TEACHING",
-            teacher_text="No teaching chunks found. Please insert rows into `chunks` with kind='TEACH'.",
-            action="NO_CHUNKS",
-            meta={"need_kind": "TEACH"},
+            teacher_text=(
+                "I can’t find TEACH chunks for this chapter yet.\n"
+                "Please add rows into `chunks` with kind='TEACH' for this board/class/subject/chapter."
+            ),
+            action="NO_TEACH_CHUNKS",
         )
 
-    idx = safe_int(s.get("chunk_index"), 0)
-    if idx >= len(teach_chunks):
-        teacher_text = "Chapter done ✅ Want a quiz now? (Call /quiz/start)"
-        return RespondOut(ok=True, session_id=body.session_id, stage="TEACHING", teacher_text=teacher_text, action="CHAPTER_DONE", meta={"done": True})
+    idx = safe_int(s.get("chunk_index"), 1)
 
-    chunk_text = (teach_chunks[idx].get("text") or "").strip()
+    # Student interrupts during teaching
+    if student_text:
+        # super-simple “answer then continue”
+        reply = (
+            f"Good question: {student_text}\n"
+            "Here’s the simple idea: I’ll explain it in our story as we go. Now let’s continue."
+        )
+        return RespondOut(
+            ok=True,
+            session_id=body.session_id,
+            stage="TEACHING",
+            teacher_text=reply,
+            action="ANSWER_INTERRUPT",
+            meta={"resume_idx": idx},
+        )
+
+    # Serve next TEACH chunk by idx matching
+    # Your table uses idx integer; we try exact match first.
+    next_row = next((c for c in teach_chunks if safe_int(c.get("idx"), -1) == idx), None)
+
+    if not next_row:
+        # If idx is out of range, finish
+        return RespondOut(
+            ok=True,
+            session_id=body.session_id,
+            stage="TEACHING",
+            teacher_text="Chapter done ✅ Want a quiz now? (Click Start Quiz)",
+            action="CHAPTER_DONE",
+            meta={"done": True},
+        )
+
+    chunk_text = (next_row.get("text") or "").strip()
     update_session(body.session_id, {"chunk_index": idx + 1})
 
     return RespondOut(
@@ -539,18 +563,26 @@ def respond(body: RespondIn):
         stage="TEACHING",
         teacher_text=chunk_text if chunk_text else "Let’s continue…",
         action="SPEAK",
-        meta={"kind": "TEACH", "idx": idx + 1, "total": len(teach_chunks)},
+        meta={"kind": "TEACH", "idx": idx},
     )
+
+# ─────────────────────────────────────────────────────────────
+# Quiz
+# ─────────────────────────────────────────────────────────────
 
 @app.post("/quiz/start")
 def quiz_start(body: QuizStartIn):
     s = get_session(body.session_id)
     analytics, quiz_state = ensure_session_struct(s)
 
-    # Use TEACH chunks only
-    chunks = fetch_chunks(s["board"], s["class_name"], s["subject"], s["chapter"], kind="TEACH", limit=500)
-    if not chunks:
-        raise HTTPException(status_code=400, detail="No TEACH chunks found for this chapter. Add content first (kind='TEACH').")
+    board = s.get("board")
+    class_name = s.get("class_name")
+    subject = s.get("subject")
+    chapter = s.get("chapter")
+
+    teach_chunks = fetch_chunks(board, class_name, subject, chapter, kind="TEACH", limit=600)
+    if not teach_chunks:
+        raise HTTPException(status_code=400, detail="No TEACH chunks found. Add content first.")
 
     attempt_id = str(uuid.uuid4())
 
@@ -563,7 +595,7 @@ def quiz_start(body: QuizStartIn):
     difficulty = clamp(safe_int(s.get("quiz_difficulty", 50), 50), 0, 100)
 
     questions_with_answers: List[Dict[str, Any]] = []
-    for c in chunks:
+    for c in teach_chunks:
         sent = pick_sentence(c.get("text", "") or "")
         if not sent:
             continue
@@ -600,15 +632,23 @@ def quiz_start(body: QuizStartIn):
     quiz_state["active"] = True
     quiz_state["target_count"] = body.count
 
-    update_session(body.session_id, {
+    patch = {
         "stage": "QUIZ",
         "quiz_state": quiz_state,
         "analytics": analytics,
         "quiz_started_at": analytics["quiz_started_at"],
         "quiz_finished_at": None,
-    })
+    }
+    update_session(body.session_id, patch)
 
-    return {"ok": True, "session_id": body.session_id, "stage": "QUIZ", "attempt_id": attempt_id, "difficulty": difficulty, "questions": public}
+    return {
+        "ok": True,
+        "session_id": body.session_id,
+        "stage": "QUIZ",
+        "attempt_id": attempt_id,
+        "difficulty": difficulty,
+        "questions": public,
+    }
 
 @app.post("/quiz/answer")
 def quiz_answer(body: QuizAnswerIn):
@@ -617,6 +657,7 @@ def quiz_answer(body: QuizAnswerIn):
         raise HTTPException(status_code=400, detail="Session is not in QUIZ stage. Call /quiz/start first.")
 
     analytics, quiz_state = ensure_session_struct(s)
+
     if not quiz_state.get("active"):
         raise HTTPException(status_code=400, detail="Quiz is not active. Call /quiz/start again.")
 
@@ -638,11 +679,12 @@ def quiz_answer(body: QuizAnswerIn):
     correct = False
     if given.lower() == expected.lower():
         correct = True
-    elif given.isdigit():
-        i = int(given) - 1
-        opts = q.get("options") or []
-        if 0 <= i < len(opts) and str(opts[i]).strip().lower() == expected.lower():
-            correct = True
+    else:
+        if given.isdigit():
+            i = int(given) - 1
+            opts = q.get("options") or []
+            if 0 <= i < len(opts) and str(opts[i]).strip().lower() == expected.lower():
+                correct = True
 
     score_total = safe_int(s.get("score_total"), 0) + 1
     score_correct = safe_int(s.get("score_correct"), 0) + (1 if correct else 0)
@@ -704,7 +746,6 @@ def quiz_answer(body: QuizAnswerIn):
         "analytics": analytics,
         "quiz_state": quiz_state,
         "quiz_difficulty": difficulty,
-        "stage": "QUIZ",
     }
 
     if quiz_complete:
@@ -714,6 +755,7 @@ def quiz_answer(body: QuizAnswerIn):
         patch["analytics"] = analytics
         patch["quiz_state"] = quiz_state
         patch["quiz_finished_at"] = finished_at
+        patch["stage"] = "QUIZ"
 
     update_session(body.session_id, patch)
 
@@ -723,7 +765,13 @@ def quiz_answer(body: QuizAnswerIn):
         "correct": correct,
         "expected": expected if not correct else None,
         "score": {"total": score_total, "correct": score_correct, "wrong": score_wrong},
-        "xp": {"earned": earned, "total": xp_new, "level": level_new, "to_next_level": xp_to_next_level(xp_new), "level_up": level_up},
+        "xp": {
+            "earned": earned,
+            "total": xp_new,
+            "level": level_new,
+            "to_next_level": xp_to_next_level(xp_new),
+            "level_up": level_up,
+        },
         "difficulty": difficulty,
         "badges_unlocked": new_badges,
         "quiz_complete": quiz_complete,
@@ -767,6 +815,26 @@ def analytics_session(session_id: str):
         },
     }
 
+@app.get("/report/json/{session_id}")
+def report_json(session_id: str):
+    s = get_session(session_id)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "session": {
+            "board": s.get("board"),
+            "class_name": s.get("class_name"),
+            "subject": s.get("subject"),
+            "chapter": s.get("chapter"),
+            "language": s.get("language"),
+            "created_at": s.get("created_at"),
+            "updated_at": s.get("updated_at"),
+        },
+        "analytics": compute_session_analytics(s),
+        "badges": s.get("badges") or [],
+        "raw_answers": (s.get("analytics") or {}).get("answers") if isinstance(s.get("analytics"), dict) else [],
+    }
+
 @app.get("/report/pdf/{session_id}")
 def report_pdf(session_id: str):
     s = get_session(session_id)
@@ -778,7 +846,7 @@ def report_pdf(session_id: str):
     from io import BytesIO
     buff = BytesIO()
     c = canvas.Canvas(buff, pagesize=A4)
-    w, h = A4
+    _, h = A4
 
     def write_line(x, y, text, size=11):
         c.setFont("Helvetica", size)
