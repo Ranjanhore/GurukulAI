@@ -1,5 +1,5 @@
 fastapi
-uvicorn
-httpx
+uvicorn[standard]
 pydantic
 supabase
+reportlab
