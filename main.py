@@ -782,128 +782,110 @@ def tts(req: TTSRequest):
 
 @app.post("/session/start")
 def start_session(req: StartSessionRequest):
-    class_name = normalize_class_name(req.class_name or req.class_level)
+    try:
+        print("SESSION START HIT")
+        print("REQ:", req.model_dump())
 
-    if not req.board.strip():
-        raise HTTPException(status_code=400, detail="board is required")
-    if not class_name:
-        raise HTTPException(status_code=400, detail="class_name/class_level is required")
-    if not req.subject.strip():
-        raise HTTPException(status_code=400, detail="subject is required")
-    if not req.chapter.strip():
-        raise HTTPException(status_code=400, detail="chapter is required")
+        class_name = normalize_class_name(req.class_name or req.class_level)
+        print("CLASS_NAME:", class_name)
 
-    board = req.board.strip()
-    subject = req.subject.strip()
-    chapter = req.chapter.strip()
+        if not req.board.strip():
+            raise HTTPException(status_code=400, detail="board is required")
+        if not class_name:
+            raise HTTPException(status_code=400, detail="class_name/class_level is required")
+        if not req.subject.strip():
+            raise HTTPException(status_code=400, detail="subject is required")
+        if not req.chapter.strip():
+            raise HTTPException(status_code=400, detail="chapter is required")
 
-    intro_chunks = fetch_chunks(board, class_name, subject, chapter, "INTRO")
-    teach_chunks = fetch_chunks(board, class_name, subject, chapter, "TEACH")
-    quiz_questions = fetch_quiz_questions(board, class_name, subject, chapter)
+        board = req.board.strip()
+        subject = req.subject.strip()
+        chapter = req.chapter.strip()
 
-    if not intro_chunks and not teach_chunks:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No INTRO or TEACH chunks found for {board} / {class_name} / {subject} / {chapter}",
-        )
+        print("FETCH INTRO...")
+        intro_chunks = fetch_chunks(board, class_name, subject, chapter, "INTRO")
+        print("INTRO COUNT:", len(intro_chunks))
 
-    session_id = str(uuid.uuid4())
-    teacher_name = (req.teacher_name or "Asha Sharma").strip()
-    teacher_credentials = (
-        req.teacher_credentials or "Pediatric Psychiatry • M.Ed"
-    ).strip()
-    teacher_style = (
-        req.teacher_style
-        or "friendly, very polite, emotionally safe, child-friendly, answers all doubts, teaches clearly, can use Hindi-English mix"
-    ).strip()
-    support_note = (
-        req.support_note
-        or "If you have not understood anything or have any confusion, please ask your question by mic or text."
-    ).strip()
+        print("FETCH TEACH...")
+        teach_chunks = fetch_chunks(board, class_name, subject, chapter, "TEACH")
+        print("TEACH COUNT:", len(teach_chunks))
 
-    student_name = (req.student_name or "").strip()
-    language = pretty_language(req.preferred_language or req.language or "")
+        print("FETCH QUIZ...")
+        quiz_questions = fetch_quiz_questions(board, class_name, subject, chapter)
+        print("QUIZ COUNT:", len(quiz_questions))
 
-    SESSIONS[session_id] = {
-        "session_id": session_id,
-        "board": board,
-        "class_name": class_name,
-        "subject": subject,
-        "chapter": chapter,
-        "student_name": title_case_name(student_name) if student_name else "",
-        "language": language,
-        "language_confirmed": False,
-        "teacher_name": teacher_name,
-        "teacher_role": teacher_role,
-        "teacher_credentials": teacher_credentials,
-        "teacher_style": teacher_style,
-        "support_note": support_note,
-        "phase": "INTRO",
-        "intro_gate_complete": False,
-        "intro_gate_announced": False,
-        "intro_chunks": intro_chunks,
-        "teach_chunks": teach_chunks,
-        "quiz_questions": quiz_questions,
-        "intro_index": 0,
-        "teach_index": 0,
-        "quiz_index": 0,
-        "score": 0,
-        "xp": 0,
-        "badges": [],
-        "quiz_total": len(quiz_questions),
-        "quiz_correct": 0,
-        "history": [],
-    }
+        if not intro_chunks and not teach_chunks:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No INTRO or TEACH chunks found for {board} / {class_name} / {subject} / {chapter}",
+            )
 
-    return {
-        "ok": True,
-        "session_id": session_id,
-        "phase": SESSIONS[session_id]["phase"],
-        "counts": {
-            "intro": len(intro_chunks),
-            "teach": len(teach_chunks),
-            "quiz": len(quiz_questions),
-        },
-    }
+        session_id = str(uuid.uuid4())
+        teacher_name = (req.teacher_name or "Dr. Asha Sharma").strip()
+        teacher_role = (req.teacher_role or "ChatGPT Teacher").strip()
+        teacher_credentials = (
+            req.teacher_credentials or "Pediatric Psychiatry • M.Ed"
+        ).strip()
+        teacher_style = (
+            req.teacher_style
+            or "friendly, very polite, emotionally safe, child-friendly, answers all doubts, teaches clearly, can use Hindi-English mix"
+        ).strip()
+        support_note = (
+            req.support_note
+            or "If you have not understood anything or have any confusion, please ask your question by mic or text."
+        ).strip()
 
-@app.post("/respond", response_model=TurnResponse)
-def respond(req: RespondRequest):
-    state = SESSIONS.get(req.session_id)
-    if not state:
-        raise HTTPException(status_code=404, detail="Session not found")
+        student_name = (req.student_name or "").strip()
+        language = pretty_language(req.preferred_language or req.language or "")
 
-    if req.teacher_name:
-        state["teacher_name"] = req.teacher_name.strip()
-    if req.teacher_role:
-        state["teacher_role"] = req.teacher_role.strip()
-    if req.teacher_credentials:
-        state["teacher_credentials"] = req.teacher_credentials.strip()
-    if req.teacher_style:
-        state["teacher_style"] = req.teacher_style.strip()
-    if req.support_note:
-        state["support_note"] = req.support_note.strip()
+        SESSIONS[session_id] = {
+            "session_id": session_id,
+            "board": board,
+            "class_name": class_name,
+            "subject": subject,
+            "chapter": chapter,
+            "student_name": title_case_name(student_name) if student_name else "",
+            "language": language,
+            "language_confirmed": False,
+            "teacher_name": teacher_name,
+            "teacher_role": teacher_role,
+            "teacher_credentials": teacher_credentials,
+            "teacher_style": teacher_style,
+            "support_note": support_note,
+            "phase": "INTRO",
+            "intro_gate_complete": False,
+            "intro_gate_announced": False,
+            "intro_chunks": intro_chunks,
+            "teach_chunks": teach_chunks,
+            "quiz_questions": quiz_questions,
+            "intro_index": 0,
+            "teach_index": 0,
+            "quiz_index": 0,
+            "score": 0,
+            "xp": 0,
+            "badges": [],
+            "quiz_total": len(quiz_questions),
+            "quiz_correct": 0,
+            "history": [],
+        }
 
-    if req.student_name and req.student_name.strip():
-        state["student_name"] = title_case_name(req.student_name.strip())
+        print("SESSION CREATED:", session_id)
 
-    incoming_language = req.preferred_language or req.language
-    if incoming_language and incoming_language.strip():
-        state["language"] = pretty_language(incoming_language.strip())
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "phase": SESSIONS[session_id]["phase"],
+            "counts": {
+                "intro": len(intro_chunks),
+                "teach": len(teach_chunks),
+                "quiz": len(quiz_questions),
+            },
+        }
 
-    text = (req.text or "").strip()
-
-    if not text:
-        return serve_next_auto_turn(state)
-
-    append_history(state, "student", text)
-
-    if state["phase"] == "QUIZ":
-        return answer_during_quiz(state, text)
-
-    if state["phase"] == "INTRO":
-        return answer_during_intro(state, text, req)
-
-    if state["phase"] == "TEACH":
-        return answer_during_teach(state, text)
-
-    return make_turn(state, final_summary_text(state), awaiting_user=False, done=True)
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print("SESSION START CRASH:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"session_start_failed: {e}")
