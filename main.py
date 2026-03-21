@@ -60,9 +60,8 @@ class StartSessionRequest(BaseModel):
     language: Optional[str] = None
     preferred_language: Optional[str] = None
 
-    teacher_name: Optional[str] = "Dr. Asha Sharma"
-    teacher_role: Optional[str] = "ChatGPT Teacher"
-    teacher_credentials: Optional[str] = "Pediatric Psychiatry • M.Ed"
+    teacher_name: Optional[str] = "Asha Sharma"
+    teacher_role: Optional[str] = "Class"
     teacher_style: Optional[str] = None
     support_note: Optional[str] = None
 
