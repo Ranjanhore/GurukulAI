@@ -593,69 +593,28 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         )
 
     if state["student_name"] and state["language_confirmed"]:
-        state["intro_gate_announced"] = True
-        state["intro_gate_complete"] = False
-        ensure_badge(state, "Introduction Complete")
-        state["xp"] += 5
+        if not state["intro_gate_announced"]:
+            state["intro_gate_announced"] = True
+            ensure_badge(state, "Introduction Complete")
+            state["xp"] += 5
+            return make_turn(
+                state,
+                teacher_language_ack(state),
+                awaiting_user=False,
+                done=False,
+            )
+
+        state["intro_gate_complete"] = True
+        teacher_text = llm_teacher_reply(state, student_text, mode="intro")
         return make_turn(
             state,
-            teacher_language_ack(state),
+            teacher_text,
             awaiting_user=False,
             done=False,
         )
 
     reply = llm_teacher_reply(state, student_text, mode="intro")
     return make_turn(state, reply, awaiting_user=True, done=False)
-
-def answer_during_teach(state: Dict[str, Any], student_text: str) -> TurnResponse:
-    ensure_badge(state, "Curious Mind")
-    state["xp"] += 2
-
-    teacher_text = llm_teacher_reply(state, student_text, mode="teach")
-    return make_turn(state, teacher_text, awaiting_user=False, done=False)
-
-def answer_during_quiz(state: Dict[str, Any], student_text: str) -> TurnResponse:
-    if state["quiz_index"] >= state["quiz_total"]:
-        state["phase"] = "DONE"
-        ensure_badge(state, "Chapter Complete")
-        return make_turn(state, final_summary_text(state), awaiting_user=False, done=True)
-
-    q = state["quiz_questions"][state["quiz_index"]]
-    correct = is_quiz_answer_correct(student_text, q)
-
-    explanation = str(q.get("explanation", "")).strip()
-    question_xp = int(q.get("xp", 10) or 10)
-
-    if correct:
-        state["score"] += 10
-        state["quiz_correct"] += 1
-        state["xp"] += question_xp
-        ensure_badge(state, "First Correct Answer")
-
-        feedback = "Correct! Great job."
-        if explanation:
-            feedback += f"\n{explanation}"
-    else:
-        state["xp"] += 2
-        feedback = "Not quite."
-        if explanation:
-            feedback += f"\n{explanation}"
-
-    state["quiz_index"] += 1
-
-    if state["quiz_index"] >= state["quiz_total"]:
-        state["phase"] = "DONE"
-        ensure_badge(state, "Chapter Complete")
-
-        if state["quiz_total"] > 0 and state["quiz_correct"] == state["quiz_total"]:
-            ensure_badge(state, "Quiz Master")
-            ensure_badge(state, "Perfect Score")
-
-        final_text = feedback + "\n\n" + final_summary_text(state)
-        return make_turn(state, final_text, awaiting_user=False, done=True)
-
-    next_text = feedback + "\n\nNext question coming up."
-    return make_turn(state, next_text, awaiting_user=False, done=False)
 
 # -----------------------------------------------------------------------------
 # Routes
