@@ -10,6 +10,26 @@ from openai import OpenAI
 from pydantic import BaseModel
 from supabase import Client, create_client
 
+app = FastAPI(title="GurukulAI Brain", version="7.0.1")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://lovable.dev",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ],
+    allow_origin_regex=r"^https://.*\.(lovable\.app|lovableproject\.com)$",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
+)
+
+@app.options("/{full_path:path}")
+def preflight_handler(full_path: str):
+    return Response(status_code=204)
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
