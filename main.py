@@ -3,11 +3,12 @@ import re
 import uuid
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+import requests
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
+from openai import OpenAI
 from pydantic import BaseModel
 from supabase import Client, create_client
-from openai import OpenAI
 
 # -----------------------------------------------------------------------------
 # Config
@@ -15,8 +16,13 @@ from openai import OpenAI
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "T536A2SFCG4AEDVTRucQ")
+ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
@@ -28,7 +34,7 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 # App
 # -----------------------------------------------------------------------------
 
-app = FastAPI(title="GurukulAI Brain", version="6.0.0")
+app = FastAPI(title="GurukulAI Brain", version="7.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,7 +49,6 @@ app.add_middleware(
 # -----------------------------------------------------------------------------
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
-
 Phase = Literal["INTRO", "TEACH", "QUIZ", "DONE"]
 
 # -----------------------------------------------------------------------------
@@ -56,12 +61,14 @@ class StartSessionRequest(BaseModel):
     class_level: Optional[str] = None
     subject: str
     chapter: str
+
     student_name: Optional[str] = None
     language: Optional[str] = None
     preferred_language: Optional[str] = None
 
-    teacher_name: Optional[str] = "Asha Sharma"
-    teacher_role: Optional[str] = "Class"
+    teacher_name: Optional[str] = "Dr. Asha Sharma"
+    teacher_role: Optional[str] = "ChatGPT Teacher"
+    teacher_credentials: Optional[str] = "Pediatric Psychiatry • M.Ed"
     teacher_style: Optional[str] = None
     support_note: Optional[str] = None
 
@@ -99,6 +106,10 @@ class TurnResponse(BaseModel):
     meta: Dict[str, Any] = {}
     report: Optional[Dict[str, Any]] = None
 
+
+class TTSRequest(BaseModel):
+    text: str
+
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
@@ -122,6 +133,8 @@ def pretty_language(value: Optional[str]) -> str:
     if "hinglish" in text:
         return "Hinglish"
     if "hindi" in text and "english" in text:
+        return "Hinglish"
+    if "english and hindi" in text:
         return "Hinglish"
     if "hindi" in text:
         return "Hindi"
@@ -327,7 +340,7 @@ def accepted_answers_for_question(q: Dict[str, Any]) -> List[str]:
             if normalize_text(str(option)) == normalize_text(correct):
                 accepted.append(chr(ord("A") + i).lower())
 
-    final = []
+    final: List[str] = []
     seen = set()
     for item in accepted:
         if item and item not in seen:
@@ -393,17 +406,19 @@ def teacher_language_ack(state: Dict[str, Any]) -> str:
         f"First I will introduce the chapter gently, then we will learn step by step, and after that I will ask a few quiz questions."
     )
 
-def intro_smalltalk_reply(state: Dict[str, Any], student_text: str, missing_name: bool, missing_language: bool) -> str:
+def intro_smalltalk_reply(
+    state: Dict[str, Any],
+    student_text: str,
+    missing_name: bool,
+    missing_language: bool,
+) -> str:
     base = (
         f"I am happy to talk with you. I will keep things calm, clear, and friendly."
         f" {state['support_note']}"
     )
 
     if missing_name:
-        return (
-            f"{base}\n\n"
-            f"Before we begin properly, please tell me your name."
-        )
+        return f"{base}\n\nBefore we begin properly, please tell me your name."
 
     if missing_language:
         return (
@@ -489,16 +504,31 @@ Instructions:
 
 def serve_intro_gate_turn(state: Dict[str, Any]) -> TurnResponse:
     if not state["student_name"]:
-        return make_turn(state, teacher_intro_greeting(state), awaiting_user=True, done=False)
+        return make_turn(
+            state,
+            teacher_intro_greeting(state),
+            awaiting_user=True,
+            done=False,
+        )
 
     if not state["language_confirmed"]:
-        return make_turn(state, teacher_intro_greeting(state), awaiting_user=True, done=False)
+        return make_turn(
+            state,
+            teacher_intro_greeting(state),
+            awaiting_user=True,
+            done=False,
+        )
 
     if not state["intro_gate_announced"]:
         state["intro_gate_announced"] = True
         ensure_badge(state, "Introduction Complete")
         state["xp"] += 5
-        return make_turn(state, teacher_language_ack(state), awaiting_user=False, done=False)
+        return make_turn(
+            state,
+            teacher_language_ack(state),
+            awaiting_user=False,
+            done=False,
+        )
 
     state["intro_gate_complete"] = True
     return serve_next_auto_turn(state)
@@ -615,6 +645,96 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     reply = llm_teacher_reply(state, student_text, mode="intro")
     return make_turn(state, reply, awaiting_user=True, done=False)
 
+def answer_during_teach(state: Dict[str, Any], student_text: str) -> TurnResponse:
+    ensure_badge(state, "Curious Mind")
+    state["xp"] += 2
+
+    teacher_text = llm_teacher_reply(state, student_text, mode="teach")
+    return make_turn(state, teacher_text, awaiting_user=False, done=False)
+
+def answer_during_quiz(state: Dict[str, Any], student_text: str) -> TurnResponse:
+    if state["quiz_index"] >= state["quiz_total"]:
+        state["phase"] = "DONE"
+        ensure_badge(state, "Chapter Complete")
+        return make_turn(
+            state,
+            final_summary_text(state),
+            awaiting_user=False,
+            done=True,
+        )
+
+    q = state["quiz_questions"][state["quiz_index"]]
+    correct = is_quiz_answer_correct(student_text, q)
+
+    explanation = str(q.get("explanation", "")).strip()
+    question_xp = int(q.get("xp", 10) or 10)
+
+    if correct:
+        state["score"] += 10
+        state["quiz_correct"] += 1
+        state["xp"] += question_xp
+        ensure_badge(state, "First Correct Answer")
+
+        feedback = "Correct! Great job."
+        if explanation:
+            feedback += f"\n{explanation}"
+    else:
+        state["xp"] += 2
+        feedback = "Not quite."
+        if explanation:
+            feedback += f"\n{explanation}"
+
+    state["quiz_index"] += 1
+
+    if state["quiz_index"] >= state["quiz_total"]:
+        state["phase"] = "DONE"
+        ensure_badge(state, "Chapter Complete")
+
+        if state["quiz_total"] > 0 and state["quiz_correct"] == state["quiz_total"]:
+            ensure_badge(state, "Quiz Master")
+            ensure_badge(state, "Perfect Score")
+
+        final_text = feedback + "\n\n" + final_summary_text(state)
+        return make_turn(state, final_text, awaiting_user=False, done=True)
+
+    next_text = feedback + "\n\nNext question coming up."
+    return make_turn(state, next_text, awaiting_user=False, done=False)
+
+def elevenlabs_tts_bytes(text: str) -> bytes:
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(status_code=500, detail="Missing ELEVENLABS_API_KEY")
+
+    if not ELEVENLABS_VOICE_ID:
+        raise HTTPException(status_code=500, detail="Missing ELEVENLABS_VOICE_ID")
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+    }
+    payload = {
+        "text": text,
+        "model_id": ELEVENLABS_MODEL_ID,
+        "voice_settings": {
+            "stability": 0.75,
+            "similarity_boost": 0.85,
+            "style": 0.10,
+            "speed": 0.85,
+            "use_speaker_boost": True,
+        },
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=90)
+        response.raise_for_status()
+        return response.content
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        raise HTTPException(status_code=502, detail=f"ElevenLabs error: {detail}") from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"ElevenLabs request failed: {exc}") from exc
+
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
@@ -625,7 +745,20 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "openai_enabled": bool(openai_client)}
+    return {
+        "ok": True,
+        "openai_enabled": bool(openai_client),
+        "elevenlabs_enabled": bool(ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID),
+    }
+
+@app.post("/tts")
+def tts(req: TTSRequest):
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    audio = elevenlabs_tts_bytes(text)
+    return Response(content=audio, media_type="audio/mpeg")
 
 @app.post("/session/start")
 def start_session(req: StartSessionRequest):
@@ -655,9 +788,10 @@ def start_session(req: StartSessionRequest):
         )
 
     session_id = str(uuid.uuid4())
-    teacher_name = (req.teacher_name or "Dr. Asha Sharma").strip()
-    teacher_role = (req.teacher_role or "ChatGPT Teacher").strip()
-    teacher_credentials = (req.teacher_credentials or "Pediatric Psychiatry • M.Ed").strip()
+    teacher_name = (req.teacher_name or "Asha Sharma").strip()
+    teacher_credentials = (
+        req.teacher_credentials or "Pediatric Psychiatry • M.Ed"
+    ).strip()
     teacher_style = (
         req.teacher_style
         or "friendly, very polite, emotionally safe, child-friendly, answers all doubts, teaches clearly, can use Hindi-English mix"
@@ -684,26 +818,20 @@ def start_session(req: StartSessionRequest):
         "teacher_credentials": teacher_credentials,
         "teacher_style": teacher_style,
         "support_note": support_note,
-
         "phase": "INTRO",
         "intro_gate_complete": False,
         "intro_gate_announced": False,
-
         "intro_chunks": intro_chunks,
         "teach_chunks": teach_chunks,
         "quiz_questions": quiz_questions,
-
         "intro_index": 0,
         "teach_index": 0,
         "quiz_index": 0,
-
         "score": 0,
         "xp": 0,
         "badges": [],
-
         "quiz_total": len(quiz_questions),
         "quiz_correct": 0,
-
         "history": [],
     }
 
