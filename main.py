@@ -14,7 +14,7 @@ from openai import OpenAI
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="7.0")
+app = FastAPI(title="GurukulAI Backend", version="8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -520,6 +520,134 @@ def build_teach_context(state: Dict[str, Any], mode: str, student_text: str) -> 
     }
 
 
+def is_repetitive_intro_reply(state: Dict[str, Any], teacher_text: str, asked_topic: Optional[str]) -> bool:
+    memory = state.setdefault("intro_memory", {
+        "asked_topics": [],
+        "answered_topics": [],
+        "last_teacher_intent": None,
+        "last_teacher_question": None,
+        "last_student_topic": None,
+        "student_opened_up": False,
+        "question_streak": 0,
+        "small_talk_turns": 0,
+        "repeat_guard": [],
+    })
+
+    recent_topics = memory.get("repeat_guard", [])[-3:]
+    last_question = (memory.get("last_teacher_question") or "").strip().lower()
+    text_low = (teacher_text or "").strip().lower()
+
+    if asked_topic and asked_topic in recent_topics:
+        return True
+
+    if last_question and text_low == last_question:
+        return True
+
+    repeated_patterns = [
+        "how are you feeling",
+        "how was your day",
+        "what did you eat",
+        "tell me your full name",
+        "what feels best to you",
+        "which language",
+        "what language do you prefer",
+    ]
+
+    for p in repeated_patterns:
+        if p in text_low and p in last_question:
+            return True
+
+    return False
+
+
+def intro_fallback_reply(state: Dict[str, Any], student_text: str) -> Dict[str, Any]:
+    low = (student_text or "").lower().strip()
+
+    if detect_food_fact(student_text):
+        fact = detect_food_fact(student_text)
+        return {
+            "teacher_text": f"That sounds nice. {fact} You sound a little more relaxed now.",
+            "teacher_intent": "respond_emotionally",
+            "asked_topic": None,
+            "awaiting_user": True,
+            "should_transition": False,
+        }
+
+    if not state.get("student_name"):
+        return {
+            "teacher_text": "By the way, tell me your full name nicely once.",
+            "teacher_intent": "ask_name",
+            "asked_topic": "name",
+            "awaiting_user": True,
+            "should_transition": False,
+        }
+
+    if not state.get("preferred_teaching_mode"):
+        return {
+            "teacher_text": "Tell me one thing — should I teach you in full English, Hindi-English mix, or with a little home-language support?",
+            "teacher_intent": "ask_learning_mode",
+            "asked_topic": "teaching_mode",
+            "awaiting_user": True,
+            "should_transition": False,
+        }
+
+    if any(x in low for x in ["ready", "let's start", "lets start", "begin", "yes teacher"]):
+        return {
+            "teacher_text": f"Very nice, {state.get('student_name') or 'dear'}. I feel we are comfortable now, so let us begin gently.",
+            "teacher_intent": "transition_to_class",
+            "asked_topic": None,
+            "awaiting_user": False,
+            "should_transition": True,
+        }
+
+    return {
+        "teacher_text": random.choice([
+            "Aha, I like the way you are opening up.",
+            "That’s nice. You sound more comfortable now.",
+            "Good. I am getting to know you a little better now.",
+        ]),
+        "teacher_intent": "respond_emotionally",
+        "asked_topic": None,
+        "awaiting_user": True,
+        "should_transition": False,
+    }
+
+
+def update_intro_memory(state: Dict[str, Any], model_result: Dict[str, Any], student_text: str) -> None:
+    memory = state.setdefault("intro_memory", {
+        "asked_topics": [],
+        "answered_topics": [],
+        "last_teacher_intent": None,
+        "last_teacher_question": None,
+        "last_student_topic": None,
+        "student_opened_up": False,
+        "question_streak": 0,
+        "small_talk_turns": 0,
+        "repeat_guard": [],
+    })
+
+    teacher_text = (model_result.get("teacher_text") or "").strip()
+    teacher_intent = model_result.get("teacher_intent")
+    asked_topic = model_result.get("asked_topic")
+
+    if asked_topic:
+        memory["asked_topics"].append(asked_topic)
+        memory["repeat_guard"].append(asked_topic)
+
+    if teacher_intent:
+        memory["last_teacher_intent"] = teacher_intent
+
+    memory["last_teacher_question"] = teacher_text
+
+    if teacher_text.endswith("?"):
+        memory["question_streak"] = int(memory.get("question_streak", 0)) + 1
+    else:
+        memory["question_streak"] = 0
+
+    if len((student_text or "").split()) > 6:
+        memory["student_opened_up"] = True
+
+
 def make_turn(
     state: Dict[str, Any],
     teacher_text: str,
@@ -652,10 +780,20 @@ def build_intro_system_prompt(state: Dict[str, Any]) -> str:
     return f"""
 You are GurukulAI Teacher in INTRO mode only.
 
-Speak like a warm, natural Indian teacher.
-Never sound robotic.
-Keep replies short and fast.
-Ask one natural question at a time.
+Your goal is to make the student comfortable in a natural human way before class starts.
+
+VERY IMPORTANT:
+You are not a survey bot.
+You must behave like a real caring teacher.
+You must react first, then ask only if needed.
+
+How to respond:
+1. First react to what the student actually said.
+2. Add one warm human reaction.
+3. Only then, if needed, ask one NEW question.
+4. Sometimes do not ask any question at all.
+5. Never repeat a topic already covered recently.
+6. No more than 2 question turns in a row.
 
 Known session info:
 - teacher_name: {state.get("teacher_name")}
@@ -667,17 +805,20 @@ Known session info:
 - preferred_teaching_mode: {state.get("preferred_teaching_mode")}
 - student_name: {state.get("student_name")}
 - intro_profile: {json.dumps(state.get("intro_profile", {}), ensure_ascii=False)}
+- intro_memory: {json.dumps(state.get("intro_memory", {}), ensure_ascii=False)}
 
 Language behavior:
 - You may playfully guess a regional language from surname, but never assume certainty.
-- Available short greeting lines for guessed language: {json.dumps(guessed_lines, ensure_ascii=False)}
+- Available short greeting lines: {json.dumps(guessed_lines, ensure_ascii=False)}
 
 Food facts:
 {json.dumps(FOOD_FACTS, ensure_ascii=False)}
 
-Return only JSON:
+Output only valid JSON:
 {{
   "teacher_text": "string",
+  "teacher_intent": "greet|respond_emotionally|light_small_talk|ask_name|playful_language_guess|ask_learning_mode|build_comfort|transition_to_class",
+  "asked_topic": null,
   "awaiting_user": true,
   "should_transition": false,
   "student_name": null,
@@ -693,7 +834,8 @@ Return only JSON:
     "rapport_score_delta": 0,
     "guessed_language": null,
     "regional_language_confirmed": null,
-    "ready_to_start": null
+    "ready_to_start": null,
+    "student_opened_up": null
   }}
 }}
 """.strip()
@@ -735,71 +877,120 @@ Teaching context:
 # =========================================================
 # Brain flows
 # =========================================================
-def answer_during_intro(state: Dict[str, Any], text: str) -> TurnResponse:
-    low = text.lower().strip()
-    intro = state.setdefault(
-        "intro_profile",
-        {
-            "student_mood": "unknown",
-            "confidence_level": "unknown",
-            "stress_level": "unknown",
-            "energy_level": "unknown",
-            "language_comfort": state.get("language", "Hinglish"),
-            "talk_style": "unknown",
-            "food_topic_seen": False,
-            "comfort_score": 10,
-            "rapport_score": 10,
-            "intro_turn_count": 0,
-            "last_food_mentioned": "",
-            "guessed_language": None,
-            "regional_language_confirmed": None,
-            "ready_to_start": False,
-        },
-    )
+def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRequest) -> TurnResponse:
+    intro = state.setdefault("intro_profile", {
+        "student_mood": "unknown",
+        "confidence_level": "unknown",
+        "stress_level": "unknown",
+        "energy_level": "unknown",
+        "language_comfort": state.get("language", "Hinglish"),
+        "talk_style": "unknown",
+        "food_topic_seen": False,
+        "comfort_score": 10,
+        "rapport_score": 10,
+        "intro_turn_count": 0,
+        "last_food_mentioned": "",
+        "guessed_language": None,
+        "regional_language_confirmed": None,
+        "ready_to_start": False,
+    })
+
+    memory = state.setdefault("intro_memory", {
+        "asked_topics": [],
+        "answered_topics": [],
+        "last_teacher_intent": None,
+        "last_teacher_question": None,
+        "last_student_topic": None,
+        "student_opened_up": False,
+        "question_streak": 0,
+        "small_talk_turns": 0,
+        "repeat_guard": [],
+    })
+
     intro["intro_turn_count"] += 1
+    low = (student_text or "").lower().strip()
 
-    maybe_name = extract_student_name(text)
-    if maybe_name and not state.get("student_name"):
-        state["student_name"] = maybe_name
+    if req.student_name and req.student_name.strip():
+        state["student_name"] = title_case_name(req.student_name.strip())
+
+    parsed_name = extract_student_name(student_text)
+    if not state.get("student_name") and parsed_name:
+        state["student_name"] = parsed_name
+        memory["answered_topics"].append("name")
+        intro["comfort_score"] += 6
         intro["rapport_score"] += 8
-        intro["comfort_score"] += 5
 
-    mode = detect_preferred_teaching_mode(text)
-    if mode:
-        state["preferred_teaching_mode"] = mode
-        intro["comfort_score"] += 10
+    incoming_language = req.preferred_language or req.language
+    if incoming_language and incoming_language.strip():
+        state["language"] = pretty_language(incoming_language.strip())
+        state["language_confirmed"] = True
+
+    parsed_mode = detect_preferred_teaching_mode(student_text)
+    if parsed_mode:
+        state["preferred_teaching_mode"] = parsed_mode
+        memory["answered_topics"].append("teaching_mode")
+        intro["comfort_score"] += 8
+        intro["rapport_score"] += 5
+
+    if any(x in low for x in ["tired", "sleepy", "exhausted"]):
+        intro["student_mood"] = "tired"
+        intro["energy_level"] = "low"
+        intro["stress_level"] = "medium"
+    elif any(x in low for x in ["good", "fine", "happy", "great", "nice", "awesome"]):
+        intro["student_mood"] = "positive"
+        intro["energy_level"] = "normal"
+        intro["confidence_level"] = "medium"
+
+    if len(student_text.split()) <= 3:
+        intro["talk_style"] = "brief"
+    elif len(student_text.split()) <= 12:
+        intro["talk_style"] = "normal"
+    else:
+        intro["talk_style"] = "expressive"
+        intro["rapport_score"] += 4
+        memory["student_opened_up"] = True
+
+    food_fact = detect_food_fact(student_text)
+    if food_fact:
+        intro["food_topic_seen"] = True
+        intro["last_food_mentioned"] = student_text
+        memory["answered_topics"].append("food")
+        intro["comfort_score"] += 6
         intro["rapport_score"] += 6
 
-    guessed = intro.get("guessed_language")
-    if state.get("student_name") and not guessed:
+    if state.get("student_name") and not intro.get("guessed_language"):
         guessed = guess_language_from_name(state["student_name"])
         if guessed:
             intro["guessed_language"] = guessed
 
-    food_fact = detect_food_fact(text)
-    if food_fact:
-        intro["food_topic_seen"] = True
-        intro["last_food_mentioned"] = text
+    if any(x in low for x in ["ready", "let's start", "lets start", "begin", "yes teacher", "start class"]):
+        intro["ready_to_start"] = True
+        intro["comfort_score"] += 10
+        intro["rapport_score"] += 5
 
     result = call_openai_json(
         build_intro_system_prompt(state),
         {
-            "student_text": text,
+            "student_text": student_text,
             "history_tail": state.get("history", [])[-8:],
             "student_name": state.get("student_name"),
             "language": state.get("language"),
             "preferred_teaching_mode": state.get("preferred_teaching_mode"),
             "intro_profile": state.get("intro_profile", {}),
+            "intro_memory": state.get("intro_memory", {}),
         },
     )
 
     if result:
         updates = result.get("intro_updates", {}) or {}
+
         if result.get("student_name") and not state.get("student_name"):
             state["student_name"] = title_case_name(str(result["student_name"]).strip())
+
         if result.get("language"):
             state["language"] = pretty_language(str(result["language"]).strip())
             state["language_confirmed"] = True
+
         if result.get("preferred_teaching_mode"):
             state["preferred_teaching_mode"] = str(result["preferred_teaching_mode"]).strip()
 
@@ -809,6 +1000,7 @@ def answer_during_intro(state: Dict[str, Any], text: str) -> TurnResponse:
 
         if updates.get("guessed_language"):
             intro["guessed_language"] = updates["guessed_language"]
+
         if updates.get("regional_language_confirmed"):
             intro["regional_language_confirmed"] = updates["regional_language_confirmed"]
 
@@ -818,58 +1010,51 @@ def answer_during_intro(state: Dict[str, Any], text: str) -> TurnResponse:
         if updates.get("ready_to_start") is True:
             intro["ready_to_start"] = True
 
-        teacher_text = str(result.get("teacher_text") or "").strip() or "Very nice. Tell me a little more about how your day was."
-        should_transition = bool(result.get("should_transition"))
+        teacher_text = (result.get("teacher_text") or "").strip()
+        teacher_intent = result.get("teacher_intent")
+        asked_topic = result.get("asked_topic")
 
-        if should_transition or intro_is_ready_to_transition(state):
+        if not teacher_text or is_repetitive_intro_reply(state, teacher_text, asked_topic):
+            result = intro_fallback_reply(state, student_text)
+            teacher_text = (result.get("teacher_text") or "").strip()
+            teacher_intent = result.get("teacher_intent")
+            asked_topic = result.get("asked_topic")
+
+        update_intro_memory(state, {
+            "teacher_text": teacher_text,
+            "teacher_intent": teacher_intent,
+            "asked_topic": asked_topic,
+        }, student_text)
+
+        if result.get("should_transition") or intro_is_ready_to_transition(state):
             state["phase"] = "STORY"
-            return make_turn(state, teacher_text, awaiting_user=False, done=False, meta={"resume_phase": "STORY"})
+            return make_turn(state, teacher_text or f"Very nice, {state.get('student_name') or 'dear'}. Let us begin gently.", awaiting_user=False, done=False, meta={"resume_phase": "STORY"})
 
-        return make_turn(state, teacher_text, awaiting_user=bool(result.get("awaiting_user", True)), done=False, meta={"intro_mode": "openai"})
-
-    # local fallback
-    if any(x in low for x in ["ready", "let's start", "lets start", "start class", "begin", "yes teacher"]):
-        intro["ready_to_start"] = True
-
-    if food_fact:
         return make_turn(
             state,
-            f"Ah, that sounds nice. Small fun fact — {food_fact} Now tell me, how are you feeling today?",
-            awaiting_user=True,
+            teacher_text,
+            awaiting_user=bool(result.get("awaiting_user", True)),
             done=False,
-            meta={"intro_mode": "food_fact_fallback"},
+            meta={
+                "intro_mode": "humanized",
+                "teacher_intent": teacher_intent,
+                "question_streak": memory.get("question_streak", 0),
+            },
         )
 
-    if guessed and not intro.get("regional_language_confirmed"):
-        sample = random.choice(LANGUAGE_GREETING_SAMPLES.get(guessed, ["Hello there!"]))
-        return make_turn(
-            state,
-            f"Your name gives me a little {guessed} vibe — I may be wrong though. Should I try one tiny line for fun? {sample}",
-            awaiting_user=True,
-            done=False,
-            meta={"intro_mode": "language_guess_fallback", "guessed_language": guessed},
-        )
+    result = intro_fallback_reply(state, student_text)
+    update_intro_memory(state, result, student_text)
 
-    if not state.get("student_name"):
-        return make_turn(state, "Before we begin properly, tell me your full name, my dear.", awaiting_user=True, done=False, meta={"needs": ["student_name"]})
-
-    if not state.get("preferred_teaching_mode"):
-        return make_turn(state, random.choice(LANGUAGE_MODE_PROMPTS), awaiting_user=True, done=False, meta={"needs": ["preferred_teaching_mode"]})
-
-    if intro_is_ready_to_transition(state):
+    if result.get("should_transition") or intro_is_ready_to_transition(state):
         state["phase"] = "STORY"
-        return make_turn(state, f"Lovely. We are settled in now, so let us gently begin {state['chapter']}.", awaiting_user=False, done=False, meta={"resume_phase": "STORY"})
+        return make_turn(state, result["teacher_text"], awaiting_user=False, done=False, meta={"resume_phase": "STORY"})
 
     return make_turn(
         state,
-        random.choice([
-            "Very nice. Was today fun or a little tiring?",
-            "Good. Tell me one nice thing about your day.",
-            "You seem more comfortable now. Were you feeling fresh or sleepy today?",
-        ]),
-        awaiting_user=True,
+        result["teacher_text"],
+        awaiting_user=bool(result.get("awaiting_user", True)),
         done=False,
-        meta={"intro_mode": "fallback"},
+        meta={"intro_mode": "fallback_humanized"},
     )
 
 
@@ -905,7 +1090,6 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
 
         return make_turn(state, teacher_text, awaiting_user=False, done=False, meta={"teach_action": action})
 
-    # local fallback
     low = text.lower()
     if "what is lamina" in low:
         return make_turn(state, "Lamina is the broad flat green part of a leaf.", awaiting_user=False, done=False)
@@ -1131,6 +1315,17 @@ def start_session(req: SessionStartRequest):
             "regional_language_confirmed": None,
             "ready_to_start": False,
         },
+        "intro_memory": {
+            "asked_topics": [],
+            "answered_topics": [],
+            "last_teacher_intent": None,
+            "last_teacher_question": None,
+            "last_student_topic": None,
+            "student_opened_up": False,
+            "question_streak": 0,
+            "small_talk_turns": 0,
+            "repeat_guard": [],
+        },
         "intro_chunks": lesson["intro_chunks"],
         "story_chunks": lesson["story_chunks"],
         "teach_chunks": lesson["teach_chunks"],
@@ -1217,7 +1412,7 @@ def respond(req: RespondRequest):
     append_history(state, "student", text)
 
     if state["phase"] == "INTRO":
-        return answer_during_intro(state, text)
+        return answer_during_intro(state, text, req)
     if state["phase"] == "STORY":
         return answer_during_story_or_teach(state, text, mode="story")
     if state["phase"] == "TEACH":
