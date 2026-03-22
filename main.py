@@ -26,6 +26,27 @@ app.add_middleware(
     max_age=86400,
 )
 
+@app.options('/{full_path:path}')
+def preflight(full_path: str):
+    return Response(status_code=204)
+
+@app.middleware('http')
+async def harden_errors(request, call_next):
+    try:
+        return await call_next(request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        print('UNHANDLED ERROR:', repr(exc))
+        traceback.print_exc()
+        return Response(
+            content='{"ok":false,"detail":"Internal server error"}',
+            status_code=500,
+            media_type='application/json',
+        )
+
+
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
@@ -1311,6 +1332,25 @@ def elevenlabs_tts_bytes(text: str, session_id: Optional[str] = None, teacher_co
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"ElevenLabs request failed: {exc}") from exc
 
+
+
+def safe_missing_session_turn(session_id: str) -> TurnResponse:
+    return TurnResponse(
+        ok=True,
+        session_id=session_id,
+        phase='INTRO',
+        teacher_text='Your class session expired or the server restarted. Please press Start Class once again.',
+        awaiting_user=False,
+        done=False,
+        score=0,
+        xp=0,
+        badges=[],
+        quiz_total=0,
+        quiz_correct=0,
+        meta={'session_recoverable': False},
+        report=None,
+    )
+
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
@@ -1325,6 +1365,24 @@ def health():
         "ok": True,
         "openai_enabled": bool(openai_client),
         "elevenlabs_enabled": bool(ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID),
+    }
+
+@app.get("/session/{session_id}")
+def get_session_status(session_id: str):
+    state = SESSIONS.get(session_id)
+    if not state:
+        return {"ok": False, "exists": False}
+    return {
+        "ok": True,
+        "exists": True,
+        "session_id": session_id,
+        "phase": state.get("phase"),
+        "student_name": state.get("student_name"),
+        "language": state.get("language"),
+        "intro_index": state.get("intro_index", 0),
+        "story_index": state.get("story_index", 0),
+        "teach_index": state.get("teach_index", 0),
+        "quiz_index": state.get("quiz_index", 0),
     }
 
 @app.get("/routes")
@@ -1496,60 +1554,82 @@ def start_session(req: StartSessionRequest):
 
 @app.post("/respond", response_model=TurnResponse)
 def respond(req: RespondRequest):
-    state = SESSIONS.get(req.session_id)
-    if not state:
-        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        state = SESSIONS.get(req.session_id)
+        if not state:
+            return safe_missing_session_turn(req.session_id)
 
-    if req.teacher_code:
-        teacher = fetch_teacher_by_code(req.teacher_code.strip())
-        if teacher:
-            state["teacher_id"] = teacher["id"]
-            state["teacher_code"] = teacher["teacher_code"]
-            state["teacher_name"] = teacher["teacher_name"]
-            state["teacher_voice_id"] = teacher.get("voice_id") or state.get("teacher_voice_id")
+        if req.teacher_code:
+            teacher = fetch_teacher_by_code(req.teacher_code.strip())
+            if teacher:
+                state["teacher_id"] = teacher["id"]
+                state["teacher_code"] = teacher["teacher_code"]
+                state["teacher_name"] = teacher["teacher_name"]
+                state["teacher_voice_id"] = teacher.get("voice_id") or state.get("teacher_voice_id")
 
-    if req.teacher_name and req.teacher_name.strip():
-        state["teacher_name"] = req.teacher_name.strip()
+        if req.teacher_name and req.teacher_name.strip():
+            state["teacher_name"] = req.teacher_name.strip()
 
-    if req.student_name and req.student_name.strip():
-        state["student_name"] = title_case_name(req.student_name.strip())
+        if req.student_name and req.student_name.strip():
+            state["student_name"] = title_case_name(req.student_name.strip())
 
-    incoming_language = req.preferred_language or req.language
-    if incoming_language and incoming_language.strip():
-        state["language"] = pretty_language(incoming_language.strip())
-        state["language_confirmed"] = True
+        incoming_language = req.preferred_language or req.language
+        if incoming_language and incoming_language.strip():
+            state["language"] = pretty_language(incoming_language.strip())
+            state["language_confirmed"] = True
 
-    if state["student_name"] and not state.get("student_id"):
-        student_row = get_or_create_student_profile(
-            state["student_name"],
-            state["board"],
-            state["class_name"],
-            state["language"],
+        if state["student_name"] and not state.get("student_id"):
+            student_row = get_or_create_student_profile(
+                state["student_name"],
+                state["board"],
+                state["class_name"],
+                state["language"],
+            )
+            if student_row:
+                state["student_id"] = student_row["id"]
+
+        text = (req.text or "").strip()
+
+        if not text:
+            return serve_next_auto_turn(state)
+
+        adjust_student_signals(state, text)
+        append_history(state, "student", text)
+
+        if state["phase"] == "INTRO":
+            return answer_during_intro(state, text, req)
+
+        if state["phase"] == "STORY":
+            return answer_during_story_or_teach(state, text, mode="story")
+
+        if state["phase"] == "TEACH":
+            return answer_during_story_or_teach(state, text, mode="teach")
+
+        if state["phase"] == "QUIZ":
+            return answer_during_quiz(state, text)
+
+        if state["phase"] == "HOMEWORK":
+            return answer_during_homework(state, text)
+
+        return make_turn(state, final_summary_text(state), awaiting_user=False, done=True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        print('RESPOND ERROR:', repr(exc))
+        traceback.print_exc()
+        return TurnResponse(
+            ok=True,
+            session_id=req.session_id,
+            phase='INTRO',
+            teacher_text='I hit a temporary server issue while continuing the class. Please press Start Class again once, and if it repeats check the backend logs for RESPOND ERROR.',
+            awaiting_user=False,
+            done=False,
+            score=0,
+            xp=0,
+            badges=[],
+            quiz_total=0,
+            quiz_correct=0,
+            meta={'server_error': str(exc)},
+            report=None,
         )
-        if student_row:
-            state["student_id"] = student_row["id"]
-
-    text = (req.text or "").strip()
-
-    if not text:
-        return serve_next_auto_turn(state)
-
-    adjust_student_signals(state, text)
-    append_history(state, "student", text)
-
-    if state["phase"] == "INTRO":
-        return answer_during_intro(state, text, req)
-
-    if state["phase"] == "STORY":
-        return answer_during_story_or_teach(state, text, mode="story")
-
-    if state["phase"] == "TEACH":
-        return answer_during_story_or_teach(state, text, mode="teach")
-
-    if state["phase"] == "QUIZ":
-        return answer_during_quiz(state, text)
-
-    if state["phase"] == "HOMEWORK":
-        return answer_during_homework(state, text)
-
-    return make_turn(state, final_summary_text(state), awaiting_user=False, done=True)
