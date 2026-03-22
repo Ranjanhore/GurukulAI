@@ -253,8 +253,8 @@ def extract_name_from_text(text: str) -> Optional[str]:
 
 def generate_lesson_content(board: str, class_name: str, subject: str, chapter: str) -> Dict[str, Any]:
     intro_chunks = [
-        f"Hello! I am your GurukulAI teacher. Today we will learn {chapter} in {subject} for class {class_name} {board}.",
-        "Before we begin, tell me your name and your preferred language: English, Hindi, Hinglish, or Bengali.",
+        f"Hello! I am your GurukulAI Biology teacher, My name is Asha Sharma. Today we will learn {chapter} in {subject} for class {class_name} {board}.",
+        "Before we begin, first tell me your name and your preferred language: English, Hindi, Hinglish, or any other language.",
         "Once you answer, I will start the lesson in a simple story style.",
     ]
 
