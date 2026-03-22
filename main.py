@@ -1517,53 +1517,71 @@ def tts(req: TTSRequest):
     return Response(content=audio, media_type="audio/mpeg")
 
 @app.post("/session/start")
-def start_session(req: StartSessionRequest):
-    class_name = normalize_class_name(req.class_name or req.class_level)
-    part_no = int(req.part_no or 1)
+def start_session(req: SessionStartRequest):
+    try:
+        session_id = str(uuid.uuid4())
 
-    if not req.board.strip():
-        raise HTTPException(status_code=400, detail="board is required")
-    if not class_name:
-        raise HTTPException(status_code=400, detail="class_name/class_level is required")
-    if not req.subject.strip():
-        raise HTTPException(status_code=400, detail="subject is required")
-    if not req.chapter.strip():
-        raise HTTPException(status_code=400, detail="chapter is required")
-
-    board = req.board.strip()
-    subject = req.subject.strip()
-    chapter_title = req.chapter.strip()
-
-    chapter_row = fetch_chapter(board, class_name, subject, chapter_title)
-    if not chapter_row:
-        raise HTTPException(status_code=404, detail=f"Chapter not found in syllabus_chapters: {board} / {class_name} / {subject} / {chapter_title}")
-
-    part_row = fetch_part(chapter_row["id"], part_no)
-    if not part_row:
-        raise HTTPException(status_code=404, detail=f"Part {part_no} not found for chapter '{chapter_title}'")
-
-    teacher = pick_teacher(board, class_name, subject, req.teacher_name, req.teacher_code)
-    language = pretty_language(req.preferred_language or req.language or "Hinglish")
-
-    intro_chunks = fetch_part_chunks(chapter_row["id"], part_row["id"], "INTRO", language)
-    teach_chunks = fetch_part_chunks(chapter_row["id"], part_row["id"], "TEACH", language)
-    quiz_questions = fetch_part_quiz_questions(chapter_row["id"], part_row["id"])
-    homework_items = fetch_homework_templates(chapter_row["id"], part_row["id"])
-    story_chunks = fetch_part_chunks(chapter_row["id"], part_row["id"], "STORY", language)
-    if not story_chunks:
-        temp_state = {
-            "board": board,
-            "class_name": class_name,
-            "subject": subject,
-            "chapter": chapter_title,
-            "chapter_id": chapter_row["id"],
-            "part_id": part_row["id"],
-            "part_no": part_no,
-            "part_title": part_row["part_title"],
-            "part_learning_goal": part_row.get("learning_goal") or "",
-            "language": language,
-            "teacher_id": teacher["id"],
+        state = {
+            "session_id": session_id,
+            "phase": "INTRO",
+            "student_name": None,
+            "teacher_name": "GurukulAI Teacher",
+            "board": req.board,
+            "class_name": req.class_name,
+            "subject": req.subject,
+            "chapter": req.chapter,
+            "part_no": getattr(req, "part_no", 1) or 1,
+            "part_title": getattr(req, "part_title", None) or req.chapter,
+            "language": "Hinglish",
+            "score": 0,
+            "xp": 0,
+            "badges": [],
+            "quiz_total": 0,
+            "quiz_correct": 0,
+            "intro_index": 0,
+            "story_index": 0,
+            "teach_index": 0,
+            "quiz_index": 0,
+            "homework_index": 0,
+            "history": [],
+            "student_id": getattr(req, "student_id", None),
+            "teacher_id": getattr(req, "teacher_id", None),
         }
+
+        # keep in memory too
+        SESSIONS[session_id] = state
+
+        # persist to Supabase
+        try:
+            payload = {
+                "session_id": session_id,
+                "phase": state.get("phase", "INTRO"),
+                "student_id": state.get("student_id"),
+                "teacher_id": state.get("teacher_id"),
+                "board": state.get("board"),
+                "class_level": state.get("class_name"),
+                "subject": state.get("subject"),
+                "chapter_title": state.get("chapter"),
+                "part_no": state.get("part_no", 1),
+                "state_json": state,
+            }
+
+            result = supabase.table("live_sessions").upsert(payload).execute()
+            print("live_sessions upsert success in /session/start:", result.data)
+        except Exception as e:
+            print("live_sessions upsert failed in /session/start:", str(e))
+
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "phase": state["phase"],
+            "message": "Session started",
+            "state": state,
+        }
+
+    except Exception as e:
+        print("start_session failed:", str(e))
+        raise HTTPException(status_code=500, detail=f"start_session failed: {str(e)}")
         story_chunks = generate_story_if_needed(temp_state)
 
     if not intro_chunks and not teach_chunks and not story_chunks:
