@@ -407,6 +407,36 @@ def start_session(req: SessionStartRequest):
         print("start_session failed:", str(e))
         raise HTTPException(status_code=500, detail=f"start_session failed: {str(e)}")
 
+class RespondRequest(BaseModel):
+    session_id: str
+    text: Optional[str] = ""
+    student_name: Optional[str] = None
+    language: Optional[str] = None
+    preferred_language: Optional[str] = None
+    teacher_name: Optional[str] = None
+    teacher_code: Optional[str] = None
+
+
+class TurnResponse(BaseModel):
+    ok: bool
+    session_id: str
+    phase: str
+    teacher_text: str
+    awaiting_user: bool
+    done: bool
+    score: int = 0
+    xp: int = 0
+    badges: List[str] = []
+    quiz_total: int = 0
+    quiz_correct: int = 0
+    meta: Optional[Dict[str, Any]] = None
+    report: Optional[Dict[str, Any]] = None
+
+
+def first_or_none(rows):
+    return rows[0] if rows else None
+
+
 
 @app.post("/respond", response_model=TurnResponse)
 def respond(req: RespondRequest):
