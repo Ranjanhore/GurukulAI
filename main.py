@@ -8,11 +8,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
+from openai import OpenAI
 
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="5.0")
+app = FastAPI(title="GurukulAI Backend", version="6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,18 +28,26 @@ app.add_middleware(
 # =========================================================
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+LIVE_SESSION_TABLE = os.getenv("LIVE_SESSION_TABLE", "live_sessions").strip()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip()
+
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
-LIVE_SESSION_TABLE = os.getenv("LIVE_SESSION_TABLE", "live_sessions").strip()
 
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+openai_client: Optional[OpenAI] = None
+if OPENAI_API_KEY:
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 # =========================================================
-# Language + Intro Data
+# Data
 # =========================================================
 REGIONAL_GUESS_MAP = {
     "chatterjee": "Bengali",
@@ -224,6 +233,25 @@ def _json_safe(value: Any) -> Any:
         return value
     return str(value)
 
+
+def safe_json_loads(text: str) -> Dict[str, Any]:
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except Exception:
+            return {}
+    return {}
+
 # =========================================================
 # DB / Persistence
 # =========================================================
@@ -243,7 +271,6 @@ def save_live_session(state: Dict[str, Any]) -> None:
         "part_no": state.get("part_no", 1),
         "state_json": _json_safe(state),
     }
-
     supabase.table(LIVE_SESSION_TABLE).upsert(payload, on_conflict="session_id").execute()
 
 
@@ -268,7 +295,6 @@ def load_live_session(session_id: str) -> Optional[Dict[str, Any]]:
             state = json.loads(state)
         except Exception:
             return None
-
     return state if isinstance(state, dict) else None
 
 
@@ -358,7 +384,7 @@ def pick_teacher_from_db(
     return default_teacher
 
 # =========================================================
-# Brain Helpers
+# Brain helpers
 # =========================================================
 def append_history(state: Dict[str, Any], role: str, text: str) -> None:
     state.setdefault("history", []).append({"role": role, "text": text})
@@ -542,66 +568,106 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
         "homework_items": homework_items,
     }
 
+# =========================================================
+# OpenAI intro brain
+# =========================================================
+def build_intro_system_prompt(state: Dict[str, Any]) -> str:
+    guessed = state.get("intro_profile", {}).get("guessed_language")
+    guessed_lines = LANGUAGE_GREETING_SAMPLES.get(guessed or "", [])
 
-def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
-    phase = state["phase"]
+    return f"""
+You are GurukulAI Teacher in INTRO mode only.
 
-    if phase == "INTRO":
-        idx = int(state.get("intro_index", 0))
-        chunks = state.get("intro_chunks", [])
-        if idx < len(chunks):
-            state["intro_index"] = idx + 1
-            return make_turn(state, chunks[idx], awaiting_user=True, done=False, meta={"intro_index": idx})
+Your job is to make the student emotionally comfortable before class begins.
 
-        teacher_text = random.choice([
-            "Now tell me a little about yourself before we begin.",
-            "We are getting comfortable now. Tell me how you are feeling.",
-            "Before class starts, let me know your full name and what language feels easiest for you.",
-        ])
-        return make_turn(state, teacher_text, awaiting_user=True, done=False, meta={"intro_index": idx})
+Speak like a warm, natural Indian teacher.
+Never sound robotic, stiff, or repetitive.
+Keep responses short to medium.
+Ask one natural question at a time.
+Do not interrogate.
+Keep intro to about 5-7 minutes total.
 
-    if phase == "STORY":
-        idx = int(state.get("story_index", 0))
-        chunks = state.get("story_chunks", [])
-        if idx < len(chunks):
-            state["story_index"] = idx + 1
-            return make_turn(state, chunks[idx], awaiting_user=False, done=False, meta={"story_index": idx})
-        state["phase"] = "TEACH"
-        return serve_next_auto_turn(state)
+Known session info:
+- teacher_name: {state.get("teacher_name")}
+- board: {state.get("board")}
+- class_name: {state.get("class_name")}
+- subject: {state.get("subject")}
+- chapter: {state.get("chapter")}
+- current_language: {state.get("language")}
+- preferred_teaching_mode: {state.get("preferred_teaching_mode")}
+- student_name: {state.get("student_name")}
+- intro_profile: {json.dumps(state.get("intro_profile", {}), ensure_ascii=False)}
 
-    if phase == "TEACH":
-        idx = int(state.get("teach_index", 0))
-        chunks = state.get("teach_chunks", [])
-        if idx < len(chunks):
-            state["teach_index"] = idx + 1
-            awaiting = idx == len(chunks) - 1
-            state["xp"] = int(state.get("xp", 0)) + 5
-            return make_turn(state, chunks[idx], awaiting_user=awaiting, done=False, meta={"teach_index": idx})
-        state["phase"] = "QUIZ"
-        return serve_next_auto_turn(state)
+Language behavior:
+- You may playfully guess a regional language from the student's surname, but never assume certainty.
+- If guessing, clearly say you may be wrong.
+- You may use one short greeting line for fun.
+- Available short greeting lines for guessed language: {json.dumps(guessed_lines, ensure_ascii=False)}
+- Then ask whether the student prefers full English, Hindi-English mix, or regional-language-English mix.
 
-    if phase == "QUIZ":
-        idx = int(state.get("quiz_index", 0))
-        questions = state.get("quiz_questions", [])
-        if idx < len(questions):
-            q = questions[idx]["question"]
-            return make_turn(state, f"Quiz time. {q}", awaiting_user=True, done=False, meta={"quiz_index": idx})
-        state["phase"] = "HOMEWORK"
-        return serve_next_auto_turn(state)
+Food behavior:
+- If the student mentions food, respond with one simple interesting fact.
+- Food facts available: {json.dumps(FOOD_FACTS, ensure_ascii=False)}
 
-    if phase == "HOMEWORK":
-        items = state.get("homework_items", [])
-        text = "Great work today. Your homework is: " + " ".join(items) if items else "Great work today. No homework for now."
-        state["phase"] = "DONE"
-        if int(state.get("quiz_correct", 0)) == int(state.get("quiz_total", 0)) and int(state.get("quiz_total", 0)) > 0:
-            if "Quiz Star" not in state["badges"]:
-                state["badges"].append("Quiz Star")
-        return make_turn(state, text, awaiting_user=False, done=True, meta={"phase_complete": "HOMEWORK"})
+You must return ONLY JSON in this exact structure:
+{{
+  "teacher_text": "string",
+  "awaiting_user": true,
+  "should_transition": false,
+  "student_name": null,
+  "language": null,
+  "preferred_teaching_mode": null,
+  "intro_updates": {{
+    "student_mood": null,
+    "confidence_level": null,
+    "stress_level": null,
+    "energy_level": null,
+    "talk_style": null,
+    "comfort_score_delta": 0,
+    "rapport_score_delta": 0,
+    "guessed_language": null,
+    "regional_language_confirmed": null,
+    "ready_to_start": null
+  }}
+}}
 
-    return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", awaiting_user=False, done=True)
+Rules:
+- If the student seems comfortable and ready, set should_transition=true.
+- If student says ready / let's start / begin / yes teacher, you may set should_transition=true.
+- If student asks any side question, answer it warmly first.
+- Use teacher name and chapter naturally when helpful.
+""".strip()
+
+
+def call_openai_intro_brain(state: Dict[str, Any], student_text: str) -> Dict[str, Any]:
+    if not openai_client:
+        return {}
+
+    history_tail = state.get("history", [])[-8:]
+    payload = {
+        "student_text": student_text,
+        "history_tail": history_tail,
+        "student_name": state.get("student_name"),
+        "language": state.get("language"),
+        "preferred_teaching_mode": state.get("preferred_teaching_mode"),
+        "intro_profile": state.get("intro_profile", {}),
+    }
+
+    try:
+        response = openai_client.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {"role": "system", "content": build_intro_system_prompt(state)},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+        )
+        return safe_json_loads(getattr(response, "output_text", "") or "")
+    except Exception as e:
+        print("call_openai_intro_brain failed:", str(e))
+        return {}
 
 # =========================================================
-# Brain
+# Brain flows
 # =========================================================
 def answer_during_intro(state: Dict[str, Any], text: str) -> TurnResponse:
     low = text.lower().strip()
@@ -633,129 +699,130 @@ def answer_during_intro(state: Dict[str, Any], text: str) -> TurnResponse:
         intro["rapport_score"] += 8
         intro["comfort_score"] += 5
 
-    if any(
-        x in low
-        for x in [
-            "english",
-            "hindi",
-            "hinglish",
-            "bengali",
-            "bangla",
-            "tamil",
-            "telugu",
-            "marathi",
-            "gujarati",
-            "malayalam",
-            "kannada",
-            "punjabi",
-            "odia",
-            "assamese",
-        ]
-    ):
-        state["language"] = pretty_language(text.strip())
-        state["language_confirmed"] = True
-        intro["language_comfort"] = state["language"]
-        intro["comfort_score"] += 10
-
     mode = detect_preferred_teaching_mode(text)
     if mode:
         state["preferred_teaching_mode"] = mode
-        intro["comfort_score"] += 12
+        intro["comfort_score"] += 10
         intro["rapport_score"] += 6
 
-    if any(x in low for x in ["tired", "sleepy", "exhausted"]):
-        intro["student_mood"] = "tired"
-        intro["energy_level"] = "low"
-        intro["stress_level"] = "medium"
-    elif any(x in low for x in ["good", "fine", "happy", "great", "nice"]):
-        intro["student_mood"] = "positive"
-        intro["energy_level"] = "normal"
-        intro["confidence_level"] = "medium"
-
-    if len(text.split()) <= 3:
-        intro["talk_style"] = "brief"
-    elif len(text.split()) <= 12:
-        intro["talk_style"] = "normal"
-    else:
-        intro["talk_style"] = "expressive"
-        intro["rapport_score"] += 4
+    guessed = intro.get("guessed_language")
+    if state.get("student_name") and not guessed:
+        guessed = guess_language_from_name(state["student_name"])
+        if guessed:
+            intro["guessed_language"] = guessed
 
     food_fact = detect_food_fact(text)
     if food_fact:
         intro["food_topic_seen"] = True
         intro["last_food_mentioned"] = text
-        intro["comfort_score"] += 5
-        intro["rapport_score"] += 5
-        teacher_text = f"Ah, that sounds nice. A small fun fact for you — {food_fact} You and I are settling in nicely now."
-        return make_turn(state, teacher_text, awaiting_user=True, done=False, meta={"intro_mode": "food_fact"})
 
-    if state.get("student_name") and not intro.get("guessed_language"):
-        guessed = guess_language_from_name(state["student_name"])
-        if guessed:
-            intro["guessed_language"] = guessed
-            sample = random.choice(LANGUAGE_GREETING_SAMPLES.get(guessed, ["Hello there!"]))
-            teacher_text = (
-                f"Your name gives me a little {guessed} vibe — I may be completely wrong though. "
-                f"Should I try one tiny line just for fun? {sample}"
-            )
-            return make_turn(
-                state,
-                teacher_text,
-                awaiting_user=True,
-                done=False,
-                meta={"intro_mode": "language_guess", "guessed_language": guessed},
-            )
+    openai_result = call_openai_intro_brain(state, text)
 
-    guessed_language = intro.get("guessed_language")
-    if guessed_language and not intro.get("regional_language_confirmed"):
-        if any(
-            x in low
-            for x in ["yes", "haan", "ha", "correct", "right", "thik", "bhalo", "ami", "kem cho", "ki haal", "ela", "eppadi", "kene", "kemiti"]
-        ):
-            intro["regional_language_confirmed"] = guessed_language
-            intro["comfort_score"] += 12
-            intro["rapport_score"] += 10
-            teacher_text = (
-                f"Aha, lovely! Then tell me, what feels easiest for learning — full English, Hindi-English mix, "
-                f"or a little {guessed_language}-English mix?"
-            )
-            return make_turn(state, teacher_text, awaiting_user=True, done=False, meta={"intro_mode": "language_mode_choice"})
+    if openai_result:
+        updates = openai_result.get("intro_updates", {}) or {}
 
+        if openai_result.get("student_name") and not state.get("student_name"):
+            state["student_name"] = title_case_name(str(openai_result["student_name"]).strip())
+
+        if openai_result.get("language"):
+            state["language"] = pretty_language(str(openai_result["language"]).strip())
+            state["language_confirmed"] = True
+
+        if openai_result.get("preferred_teaching_mode"):
+            state["preferred_teaching_mode"] = str(openai_result["preferred_teaching_mode"]).strip()
+
+        for key in ["student_mood", "confidence_level", "stress_level", "energy_level", "talk_style"]:
+            if updates.get(key):
+                intro[key] = updates[key]
+
+        if updates.get("guessed_language"):
+            intro["guessed_language"] = updates["guessed_language"]
+
+        if updates.get("regional_language_confirmed"):
+            intro["regional_language_confirmed"] = updates["regional_language_confirmed"]
+
+        intro["comfort_score"] = max(0, min(100, int(intro.get("comfort_score", 0)) + int(updates.get("comfort_score_delta", 0) or 0)))
+        intro["rapport_score"] = max(0, min(100, int(intro.get("rapport_score", 0)) + int(updates.get("rapport_score_delta", 0) or 0)))
+
+        if updates.get("ready_to_start") is True:
+            intro["ready_to_start"] = True
+
+        teacher_text = str(openai_result.get("teacher_text") or "").strip()
+        should_transition = bool(openai_result.get("should_transition"))
+
+        if not teacher_text:
+            teacher_text = "Very nice. Tell me a little more about how your day was."
+
+        if should_transition or intro_is_ready_to_transition(state):
+            state["phase"] = "STORY"
+            return make_turn(state, teacher_text, awaiting_user=False, done=False, meta={"resume_phase": "STORY"})
+
+        return make_turn(
+            state,
+            teacher_text,
+            awaiting_user=bool(openai_result.get("awaiting_user", True)),
+            done=False,
+            meta={"intro_mode": "openai"},
+        )
+
+    # fallback
     if any(x in low for x in ["ready", "let's start", "lets start", "start class", "begin", "yes teacher"]):
         intro["ready_to_start"] = True
-        intro["comfort_score"] += 10
-        intro["rapport_score"] += 5
+
+    if food_fact:
+        return make_turn(
+            state,
+            f"Ah, that sounds nice. A small fun fact for you — {food_fact} You and I are settling in nicely now.",
+            awaiting_user=True,
+            done=False,
+            meta={"intro_mode": "food_fact"},
+        )
+
+    if guessed and not intro.get("regional_language_confirmed"):
+        sample = random.choice(LANGUAGE_GREETING_SAMPLES.get(guessed, ["Hello there!"]))
+        return make_turn(
+            state,
+            f"Your name gives me a little {guessed} vibe — I may be wrong though. Should I try one tiny line just for fun? {sample}",
+            awaiting_user=True,
+            done=False,
+            meta={"intro_mode": "language_guess", "guessed_language": guessed},
+        )
 
     if not state.get("student_name"):
-        teacher_text = random.choice([
+        return make_turn(
+            state,
             "Before we begin properly, tell me your full name, my dear.",
-            "I want to know your full name first. Tell me nicely.",
-            "First tell me your full name, then I’ll know how to talk to you more comfortably.",
-        ])
-        return make_turn(state, teacher_text, awaiting_user=True, done=False, meta={"needs": ["student_name"]})
+            awaiting_user=True,
+            done=False,
+            meta={"needs": ["student_name"]},
+        )
 
     if not state.get("preferred_teaching_mode"):
-        teacher_text = random.choice(LANGUAGE_MODE_PROMPTS)
-        return make_turn(state, teacher_text, awaiting_user=True, done=False, meta={"needs": ["preferred_teaching_mode"]})
+        return make_turn(
+            state,
+            random.choice(LANGUAGE_MODE_PROMPTS),
+            awaiting_user=True,
+            done=False,
+            meta={"needs": ["preferred_teaching_mode"]},
+        )
 
     if intro_is_ready_to_transition(state):
         state["phase"] = "STORY"
-        teacher_text = random.choice([
-            f"Very nice, {state['student_name']}. Now I feel you are comfortable with me. Let us begin our journey into {state['chapter']}.",
+        return make_turn(
+            state,
             f"Lovely. We are settled in now, so let us gently begin {state['chapter']}.",
-            f"Good, now we understand each other a little better. Shall we step into {state['chapter']} together?",
-        ])
-        return make_turn(state, teacher_text, awaiting_user=False, done=False, meta={"resume_phase": "STORY"})
+            awaiting_user=False,
+            done=False,
+            meta={"resume_phase": "STORY"},
+        )
 
-    teacher_text = random.choice([
+    return make_turn(
+        state,
         "Very nice. Tell me a little more — was today fun, tiring, or just normal?",
-        "Hmm, I like listening to you. Tell me, what was the nicest part of your day?",
-        "You are opening up nicely. One more thing — were you feeling fresh today or a little tired?",
-        "Good. I want class to feel easy for you. Tell me, should I keep it more simple and friendly, or direct and quick?",
-    ])
-    intro["comfort_score"] += 4
-    intro["rapport_score"] += 4
-    return make_turn(state, teacher_text, awaiting_user=True, done=False, meta={"intro_mode": "casual_followup"})
+        awaiting_user=True,
+        done=False,
+        meta={"intro_mode": "fallback"},
+    )
 
 
 def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) -> TurnResponse:
@@ -819,6 +886,64 @@ def answer_during_homework(state: Dict[str, Any], text: str) -> TurnResponse:
     state["phase"] = "DONE"
     return make_turn(state, "Wonderful. We are done for today. Revise the chapter once and complete the homework.", awaiting_user=False, done=True)
 
+
+def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
+    phase = state["phase"]
+
+    if phase == "INTRO":
+        idx = int(state.get("intro_index", 0))
+        chunks = state.get("intro_chunks", [])
+        if idx < len(chunks):
+            state["intro_index"] = idx + 1
+            return make_turn(state, chunks[idx], awaiting_user=True, done=False, meta={"intro_index": idx})
+        return make_turn(
+            state,
+            "Now tell me a little about yourself before we begin.",
+            awaiting_user=True,
+            done=False,
+            meta={"intro_index": idx},
+        )
+
+    if phase == "STORY":
+        idx = int(state.get("story_index", 0))
+        chunks = state.get("story_chunks", [])
+        if idx < len(chunks):
+            state["story_index"] = idx + 1
+            return make_turn(state, chunks[idx], awaiting_user=False, done=False, meta={"story_index": idx})
+        state["phase"] = "TEACH"
+        return serve_next_auto_turn(state)
+
+    if phase == "TEACH":
+        idx = int(state.get("teach_index", 0))
+        chunks = state.get("teach_chunks", [])
+        if idx < len(chunks):
+            state["teach_index"] = idx + 1
+            awaiting = idx == len(chunks) - 1
+            state["xp"] = int(state.get("xp", 0)) + 5
+            return make_turn(state, chunks[idx], awaiting_user=awaiting, done=False, meta={"teach_index": idx})
+        state["phase"] = "QUIZ"
+        return serve_next_auto_turn(state)
+
+    if phase == "QUIZ":
+        idx = int(state.get("quiz_index", 0))
+        questions = state.get("quiz_questions", [])
+        if idx < len(questions):
+            q = questions[idx]["question"]
+            return make_turn(state, f"Quiz time. {q}", awaiting_user=True, done=False, meta={"quiz_index": idx})
+        state["phase"] = "HOMEWORK"
+        return serve_next_auto_turn(state)
+
+    if phase == "HOMEWORK":
+        items = state.get("homework_items", [])
+        text = "Great work today. Your homework is: " + " ".join(items) if items else "Great work today. No homework for now."
+        state["phase"] = "DONE"
+        if int(state.get("quiz_correct", 0)) == int(state.get("quiz_total", 0)) and int(state.get("quiz_total", 0)) > 0:
+            if "Quiz Star" not in state["badges"]:
+                state["badges"].append("Quiz Star")
+        return make_turn(state, text, awaiting_user=False, done=True, meta={"phase_complete": "HOMEWORK"})
+
+    return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", awaiting_user=False, done=True)
+
 # =========================================================
 # Routes
 # =========================================================
@@ -828,6 +953,8 @@ def health():
         "ok": True,
         "service": "gurukulai-backend",
         "supabase_enabled": bool(supabase),
+        "openai_enabled": bool(openai_client),
+        "openai_model": OPENAI_MODEL if openai_client else None,
         "elevenlabs_enabled": bool(ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID),
     }
 
