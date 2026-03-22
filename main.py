@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import traceback
 from typing import Any, Dict, List, Literal, Optional
 
 import requests
@@ -10,16 +11,15 @@ from openai import OpenAI
 from pydantic import BaseModel
 from supabase import Client, create_client
 
-app = FastAPI(title="GurukulAI Brain", version="7.0.1")
+# -----------------------------------------------------------------------------
+# App + CORS
+# -----------------------------------------------------------------------------
+
+app = FastAPI(title="GurukulAI Brain", version="8.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://lovable.dev",
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ],
-    allow_origin_regex=r"^https://.*\.(lovable\.app|lovableproject\.com)$",
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,9 +27,6 @@ app.add_middleware(
     max_age=86400,
 )
 
-@app.options("/{full_path:path}")
-def preflight_handler(full_path: str):
-    return Response(status_code=204)
 # -----------------------------------------------------------------------------
 # Config
 # -----------------------------------------------------------------------------
@@ -49,20 +46,6 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
-# -----------------------------------------------------------------------------
-# App
-# -----------------------------------------------------------------------------
-
-app = FastAPI(title="GurukulAI Brain", version="7.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # -----------------------------------------------------------------------------
 # In-memory session store
@@ -133,6 +116,11 @@ class TTSRequest(BaseModel):
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+
+def model_to_dict(model: BaseModel) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
 
 def normalize_class_name(value: Optional[str]) -> str:
     if value is None:
@@ -342,7 +330,7 @@ def format_question(q_index: int, q_total: int, q: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 def accepted_answers_for_question(q: Dict[str, Any]) -> List[str]:
-    accepted = []
+    accepted: List[str] = []
 
     options = q.get("options") or []
     correct = str(q.get("correct_answer", "")).strip()
@@ -771,6 +759,19 @@ def health():
         "elevenlabs_enabled": bool(ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID),
     }
 
+@app.get("/routes")
+def list_routes():
+    return sorted(
+        [
+            {
+                "path": route.path,
+                "methods": sorted(list(route.methods)) if hasattr(route, "methods") else [],
+            }
+            for route in app.routes
+        ],
+        key=lambda x: x["path"],
+    )
+
 @app.post("/tts")
 def tts(req: TTSRequest):
     text = (req.text or "").strip()
@@ -784,7 +785,7 @@ def tts(req: TTSRequest):
 def start_session(req: StartSessionRequest):
     try:
         print("SESSION START HIT")
-        print("REQ:", req.model_dump())
+        print("REQ:", model_to_dict(req))
 
         class_name = normalize_class_name(req.class_name or req.class_level)
         print("CLASS_NAME:", class_name)
@@ -821,11 +822,10 @@ def start_session(req: StartSessionRequest):
             )
 
         session_id = str(uuid.uuid4())
+
         teacher_name = (req.teacher_name or "Dr. Asha Sharma").strip()
         teacher_role = (req.teacher_role or "ChatGPT Teacher").strip()
-        teacher_credentials = (
-            req.teacher_credentials or "Pediatric Psychiatry • M.Ed"
-        ).strip()
+        teacher_credentials = (req.teacher_credentials or "Pediatric Psychiatry • M.Ed").strip()
         teacher_style = (
             req.teacher_style
             or "friendly, very polite, emotionally safe, child-friendly, answers all doubts, teaches clearly, can use Hindi-English mix"
@@ -885,7 +885,48 @@ def start_session(req: StartSessionRequest):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         print("SESSION START CRASH:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"session_start_failed: {e}")
+
+@app.post("/respond", response_model=TurnResponse)
+def respond(req: RespondRequest):
+    state = SESSIONS.get(req.session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if req.teacher_name:
+        state["teacher_name"] = req.teacher_name.strip()
+    if req.teacher_role:
+        state["teacher_role"] = req.teacher_role.strip()
+    if req.teacher_credentials:
+        state["teacher_credentials"] = req.teacher_credentials.strip()
+    if req.teacher_style:
+        state["teacher_style"] = req.teacher_style.strip()
+    if req.support_note:
+        state["support_note"] = req.support_note.strip()
+
+    if req.student_name and req.student_name.strip():
+        state["student_name"] = title_case_name(req.student_name.strip())
+
+    incoming_language = req.preferred_language or req.language
+    if incoming_language and incoming_language.strip():
+        state["language"] = pretty_language(incoming_language.strip())
+
+    text = (req.text or "").strip()
+
+    if not text:
+        return serve_next_auto_turn(state)
+
+    append_history(state, "student", text)
+
+    if state["phase"] == "QUIZ":
+        return answer_during_quiz(state, text)
+
+    if state["phase"] == "INTRO":
+        return answer_during_intro(state, text, req)
+
+    if state["phase"] == "TEACH":
+        return answer_during_teach(state, text)
+
+    return make_turn(state, final_summary_text(state), awaiting_user=False, done=True)
