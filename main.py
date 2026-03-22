@@ -1681,6 +1681,278 @@ def start_session(req: SessionStartRequest):
         },
     }
 
+LIVE_SESSION_TABLE = os.getenv("LIVE_SESSION_TABLE", "live_sessions")
+LIVE_SESSION_TTL_SECONDS = int(os.getenv("LIVE_SESSION_TTL_SECONDS", "43200"))
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def save_live_session(state: Dict[str, Any]) -> None:
+    payload = {
+        "session_id": state["session_id"],
+        "phase": state.get("phase", "INTRO"),
+        "student_id": state.get("student_id"),
+        "teacher_id": state.get("teacher_id"),
+        "board": state.get("board"),
+        "class_level": state.get("class_name"),
+        "subject": state.get("subject"),
+        "chapter_title": state.get("chapter"),
+        "part_no": state.get("part_no"),
+        "state_json": _json_safe(state),
+    }
+    supabase.table(LIVE_SESSION_TABLE).upsert(
+        payload,
+        on_conflict="session_id",
+    ).execute()
+
+
+def load_live_session(session_id: str) -> Optional[Dict[str, Any]]:
+    row = (
+        supabase.table(LIVE_SESSION_TABLE)
+        .select("*")
+        .eq("session_id", session_id)
+        .limit(1)
+        .execute()
+    )
+    item = first_or_none(row.data)
+    if not item:
+        return None
+
+    state = item.get("state_json")
+    if isinstance(state, str):
+        state = json.loads(state)
+
+    if isinstance(state, dict):
+        return state
+    return None
+
+
+def get_live_state(session_id: str) -> Optional[Dict[str, Any]]:
+    state = SESSIONS.get(session_id)
+    if state:
+        return state
+
+    state = load_live_session(session_id)
+    if state:
+        SESSIONS[session_id] = state
+    return state
+
+
+class SessionStartRequest(BaseModel):
+    board: str
+    class_name: Optional[str] = None
+    class_level: Optional[str] = None
+    subject: str
+    chapter: Optional[str] = None
+    chapter_title: Optional[str] = None
+    part_no: Optional[int] = 1
+
+    student_name: Optional[str] = None
+    language: Optional[str] = None
+    preferred_language: Optional[str] = None
+
+    teacher_name: Optional[str] = None
+    teacher_code: Optional[str] = None
+
+
+@app.get("/session/{session_id}")
+def get_session_status(session_id: str):
+    state = get_live_state(session_id)
+    return {
+        "ok": bool(state),
+        "exists": bool(state),
+        "session_id": session_id,
+        "phase": state.get("phase") if state else None,
+    }
+
+
+@app.post("/session/start")
+def start_session(req: SessionStartRequest):
+    try:
+        board = (req.board or "").strip()
+        class_name = normalize_class_name(req.class_name or req.class_level)
+        subject = (req.subject or "").strip()
+        chapter_title = (req.chapter or req.chapter_title or "").strip()
+        part_no = int(req.part_no or 1)
+        language = pretty_language(req.preferred_language or req.language or "Hinglish")
+
+        if not board:
+            raise HTTPException(status_code=422, detail="board is required")
+        if not class_name:
+            raise HTTPException(status_code=422, detail="class_name or class_level is required")
+        if not subject:
+            raise HTTPException(status_code=422, detail="subject is required")
+        if not chapter_title:
+            raise HTTPException(status_code=422, detail="chapter or chapter_title is required")
+
+        chapter_row = fetch_chapter(board, class_name, subject, chapter_title)
+        if not chapter_row:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Chapter not found for board={board}, class={class_name}, subject={subject}, chapter={chapter_title}",
+            )
+
+        part_row = fetch_part(chapter_row["id"], part_no)
+        if not part_row:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Part {part_no} not found for chapter '{chapter_title}'",
+            )
+
+        teacher = pick_teacher(
+            board=board,
+            class_name=class_name,
+            subject=subject,
+            requested_name=req.teacher_name,
+            requested_code=req.teacher_code,
+        )
+
+        intro_chunks = fetch_part_chunks(chapter_row["id"], part_row["id"], "intro", language)
+        teach_chunks = fetch_part_chunks(chapter_row["id"], part_row["id"], "teach", language)
+        story_chunks = fetch_part_chunks(chapter_row["id"], part_row["id"], "story", language)
+        quiz_questions = fetch_part_quiz_questions(chapter_row["id"], part_row["id"])
+        homework_items = fetch_homework_templates(chapter_row["id"], part_row["id"])
+
+        temp_state = {
+            "chapter_id": chapter_row["id"],
+            "part_id": part_row["id"],
+            "chapter": chapter_title,
+            "part_no": part_no,
+            "part_title": part_row["part_title"],
+            "part_learning_goal": part_row.get("learning_goal") or "",
+            "board": board,
+            "class_name": class_name,
+            "subject": subject,
+            "language": language,
+            "teacher_id": teacher["id"],
+        }
+
+        if not story_chunks:
+            story_chunks = generate_story_if_needed(temp_state)
+
+        if not intro_chunks and not teach_chunks and not story_chunks:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No chunks found for chapter '{chapter_title}' part {part_no}",
+            )
+
+        student_name = title_case_name((req.student_name or "").strip()) if (req.student_name or "").strip() else ""
+        student_row = (
+            get_or_create_student_profile(student_name, board, class_name, language)
+            if student_name else None
+        )
+
+        session_id = str(uuid.uuid4())
+
+        state: Dict[str, Any] = {
+            "session_id": session_id,
+            "db_session_id": None,
+            "student_id": student_row["id"] if student_row else None,
+            "teacher_id": teacher["id"],
+            "teacher_code": teacher["teacher_code"],
+            "teacher_name": teacher["teacher_name"],
+            "teacher_voice_id": teacher.get("voice_id") or ELEVENLABS_VOICE_ID,
+            "teacher_teaching_pattern": teacher.get("teaching_pattern") or "",
+            "teacher_story_pattern": teacher.get("story_pattern") or "",
+            "teacher_calm_support_style": teacher.get("calm_support_style") or "",
+            "teacher_speaking_rate": float(teacher.get("speaking_rate") or 0.88),
+            "teacher_stability": float(teacher.get("stability") or 0.76),
+            "teacher_similarity_boost": float(teacher.get("similarity_boost") or 0.86),
+            "teacher_style_strength": float(teacher.get("style_strength") or 0.10),
+
+            "board": board,
+            "class_name": class_name,
+            "class_level": class_name,
+            "subject": subject,
+            "chapter": chapter_title,
+            "chapter_title": chapter_title,
+
+            "chapter_id": chapter_row["id"],
+            "part_id": part_row["id"],
+            "part_no": part_no,
+            "part_title": part_row["part_title"],
+            "part_learning_goal": part_row.get("learning_goal") or "",
+            "part_story_theme": part_row.get("story_theme") or "",
+
+            "student_name": student_name,
+            "language": language,
+            "language_confirmed": bool(req.preferred_language or req.language),
+
+            "phase": "INTRO",
+            "intro_gate_complete": False,
+            "intro_gate_announced": False,
+
+            "intro_chunks": intro_chunks,
+            "story_chunks": story_chunks,
+            "teach_chunks": teach_chunks,
+            "quiz_questions": quiz_questions,
+            "homework_items": homework_items,
+
+            "intro_index": 0,
+            "story_index": 0,
+            "teach_index": 0,
+            "quiz_index": 0,
+            "homework_index": 0,
+
+            "score": 0,
+            "xp": 0,
+            "badges": [],
+            "quiz_total": len(quiz_questions),
+            "quiz_correct": 0,
+
+            "confidence_score": 50.0,
+            "stress_score": 20.0,
+            "engagement_score": 50.0,
+
+            "history": [],
+        }
+
+        state["db_session_id"] = create_db_session(state)
+        persist_homework_prompts(state)
+
+        SESSIONS[session_id] = state
+        save_live_session(state)
+
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "phase": state["phase"],
+            "counts": {
+                "intro": len(intro_chunks),
+                "story": len(story_chunks),
+                "teach": len(teach_chunks),
+                "quiz": len(quiz_questions),
+                "homework": len(homework_items),
+            },
+            "teacher": {
+                "teacher_id": teacher["id"],
+                "teacher_code": teacher["teacher_code"],
+                "teacher_name": teacher["teacher_name"],
+            },
+            "part": {
+                "part_no": part_no,
+                "part_title": part_row["part_title"],
+            },
+            "state": state,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("start_session failed:", str(e))
+        raise HTTPException(status_code=500, detail=f"start_session failed: {str(e)}")
+
+
 @app.post("/respond", response_model=TurnResponse)
 def respond(req: RespondRequest):
     state = get_live_state(req.session_id)
