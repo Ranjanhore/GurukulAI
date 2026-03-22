@@ -18,6 +18,61 @@ from supabase import Client, create_client
 
 app = FastAPI(title="GurukulAI Brain", version="9.0.0")
 
+import uuid
+
+@app.get("/debug/live-session-write")
+def debug_live_session_write():
+    test_id = f"debug-{uuid.uuid4()}"
+
+    payload = {
+        "session_id": test_id,
+        "phase": "DEBUG",
+        "student_id": None,
+        "teacher_id": None,
+        "board": "ICSE",
+        "class_level": "6",
+        "subject": "Biology",
+        "chapter_title": "The Leaf",
+        "part_no": 1,
+        "state_json": {
+            "session_id": test_id,
+            "phase": "DEBUG",
+            "student_name": None,
+            "teacher_name": "GurukulAI Teacher",
+            "board": "ICSE",
+            "class_name": "6",
+            "subject": "Biology",
+            "chapter": "The Leaf",
+            "part_no": 1,
+            "part_title": "Debug Part",
+            "language": "Hinglish",
+            "score": 0,
+            "xp": 0,
+            "badges": [],
+            "quiz_total": 0,
+            "quiz_correct": 0,
+            "intro_index": 0,
+            "story_index": 0,
+            "teach_index": 0,
+            "quiz_index": 0,
+            "homework_index": 0,
+            "history": [],
+        },
+    }
+
+    try:
+        result = supabase.table("live_sessions").upsert(payload).execute()
+        return {
+            "ok": True,
+            "session_id": test_id,
+            "result": result.data,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+        }
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
