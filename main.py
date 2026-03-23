@@ -14,7 +14,7 @@ from openai import OpenAI
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="9.0")
+app = FastAPI(title="GurukulAI Backend", version="9.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,7 +33,7 @@ LIVE_SESSION_TABLE = os.getenv("LIVE_SESSION_TABLE", "live_sessions").strip()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip()
-OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "5"))
+OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "3"))
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
@@ -121,14 +121,13 @@ FOOD_FACTS = {
 }
 
 CASUAL_INTRO_OPENERS = [
-    "Hello my dear, I am {teacher_name}. Before we jump into {subject}, tell me, how has your day been so far?",
-    "Hi sweetheart, I’m {teacher_name}. I know we will study {chapter} today, but first I want to know how you are feeling.",
-    "Hello, I’m {teacher_name}. No hurry to start the lesson immediately — tell me, was today a fun day or a tiring one?",
-    "Hi there, I’m {teacher_name}. Before class begins, let us settle in a little. How are you doing today?",
+    "Hello my dear, I am {teacher_name}. I’ll be with you through this class in a friendly way.",
+    "Hi sweetheart, I’m {teacher_name}. I’ll stay with you gently through this class.",
+    "Hello, I’m {teacher_name}. We’ll make this class warm and easy together.",
 ]
 
 LANGUAGE_MODE_PROMPTS = [
-    "For learning, what feels best to you — full English, Hindi-English mix, or a mix with your home language?",
+    "Now tell me one thing — should I teach you in full English, Hindi-English mix, or with a little home-language support?",
     "Tell me your comfort style — full English, Hinglish, or a mix with your home language?",
     "How should I teach you so it feels easiest — English, Hindi-English mix, or your regional language mixed with English?",
 ]
@@ -270,6 +269,23 @@ def title_case_name(name: str) -> str:
     return " ".join(part.capitalize() for part in name.split())
 
 
+def sanitize_teacher_name(name: Optional[str]) -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        return "Teacher Asha Sharma"
+
+    lowered = raw.lower()
+    if lowered.startswith("dr. "):
+        raw = raw[4:].strip()
+    elif lowered.startswith("dr "):
+        raw = raw[3:].strip()
+
+    if raw.lower().startswith("teacher "):
+        return raw
+
+    return f"Teacher {raw}"
+
+
 def first_or_none(rows):
     return rows[0] if rows else None
 
@@ -374,7 +390,7 @@ def pick_teacher_from_db(
     requested_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     default_teacher = {
-        "teacher_name": requested_name or "Dr. Asha Sharma",
+        "teacher_name": sanitize_teacher_name(requested_name or "Asha Sharma"),
         "teacher_code": requested_code,
         "voice_id": ELEVENLABS_VOICE_ID or None,
     }
@@ -406,6 +422,7 @@ def pick_teacher_from_db(
             )
             item = first_or_none(row.data)
             if item:
+                item["teacher_name"] = sanitize_teacher_name(item.get("teacher_name"))
                 return item
 
         row = (
@@ -420,6 +437,7 @@ def pick_teacher_from_db(
         )
         item = first_or_none(row.data)
         if item:
+            item["teacher_name"] = sanitize_teacher_name(item.get("teacher_name"))
             return item
 
         row = (
@@ -432,6 +450,7 @@ def pick_teacher_from_db(
         )
         item = first_or_none(row.data)
         if item:
+            item["teacher_name"] = sanitize_teacher_name(item.get("teacher_name"))
             return item
     except Exception as e:
         print("pick_teacher_from_db failed:", str(e))
@@ -638,6 +657,7 @@ def is_repetitive_intro_reply(state: Dict[str, Any], teacher_text: str, asked_to
         "what language",
         "what feels best to you",
         "which language",
+        "full english, hindi-english mix",
     ]
 
     for p in repeated_patterns:
@@ -705,12 +725,22 @@ def intro_followup_after_reaction(state: Dict[str, Any], student_text: str) -> s
 def intro_fallback_reply(state: Dict[str, Any], student_text: str) -> Dict[str, Any]:
     memory = state.setdefault("intro_memory", {})
     stage = memory.get("bonding_stage", "warmup")
+    closed_topics = set(memory.get("closed_topics", []))
+    reaction = build_reactive_intro_reply(student_text)
     low = (student_text or "").lower().strip()
 
-    food_fact = detect_food_fact(student_text)
-    reaction = build_reactive_intro_reply(student_text)
+    if "mic_instruction" not in closed_topics:
+        close_topic(state, "mic_instruction")
+        return {
+            "teacher_text": f"{reaction} And remember, whenever you want to speak, just press and hold the mic button, speak comfortably, and release it. I will listen to you.",
+            "teacher_intent": "build_comfort",
+            "asked_topic": None,
+            "awaiting_user": True,
+            "should_transition": False,
+        }
 
-    if food_fact and "food" not in memory.get("closed_topics", []):
+    food_fact = detect_food_fact(student_text)
+    if food_fact and "food" not in closed_topics:
         close_topic(state, "food")
         return {
             "teacher_text": f"{reaction} I like how naturally you are talking now.",
@@ -720,7 +750,7 @@ def intro_fallback_reply(state: Dict[str, Any], student_text: str) -> Dict[str, 
             "should_transition": False,
         }
 
-    if not state.get("student_name") and "name" not in memory.get("closed_topics", []):
+    if not state.get("student_name") and "name" not in closed_topics:
         return {
             "teacher_text": f"{reaction} By the way, tell me your full name once nicely.",
             "teacher_intent": "ask_name",
@@ -729,9 +759,9 @@ def intro_fallback_reply(state: Dict[str, Any], student_text: str) -> Dict[str, 
             "should_transition": False,
         }
 
-    if not state.get("preferred_teaching_mode") and "teaching_mode" not in memory.get("closed_topics", []):
+    if not state.get("preferred_teaching_mode") and "teaching_mode" not in closed_topics:
         return {
-            "teacher_text": f"{reaction} Tell me one thing — should I teach you in full English, Hindi-English mix, or with a little home-language support?",
+            "teacher_text": f"{reaction} Now tell me one thing — should I teach you in full English, Hindi-English mix, or with a little home-language support?",
             "teacher_intent": "ask_learning_mode",
             "asked_topic": "teaching_mode",
             "awaiting_user": True,
@@ -860,7 +890,12 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
             subject=subject,
             chapter=chapter,
         ),
-        random.choice(LANGUAGE_MODE_PROMPTS),
+        "Whenever you want to speak, press and hold the mic button, speak comfortably, and then release it. I will listen to you.",
+        random.choice([
+            "Before we begin, tell me a little about how your day has been.",
+            "Before class starts, tell me how you are feeling today.",
+            "No hurry at all. First tell me how your day has been so far.",
+        ]),
     ]
     story_chunks = [
         f"Imagine you are walking through a green garden. Leaves are silently working like tiny food factories. That is why the chapter {chapter} is so important.",
@@ -931,20 +966,25 @@ def call_openai_json(system_prompt: str, payload: Dict[str, Any]) -> Dict[str, A
 def build_intro_system_prompt(state: Dict[str, Any]) -> str:
     guessed = state.get("intro_profile", {}).get("guessed_language")
     guessed_lines = LANGUAGE_GREETING_SAMPLES.get(guessed or "", [])
+
     return f"""
 You are GurukulAI Teacher in INTRO mode only.
 
 {RESPONSE_FLOW_RULE}
 
-Your goal is to make the student comfortable in a natural human way before class starts.
+Your goal is to make the student emotionally comfortable in a natural human way for about 5 to 7 minutes before class starts.
 
 VERY IMPORTANT:
-You are not a survey bot.
-You must behave like a real caring teacher.
-You must react first, then ask only if needed.
-Sometimes do not ask any question at all.
-Never repeat a topic that is already closed.
-Do not reopen name, food, day, mood, or language topics once they are complete unless truly necessary.
+- You are not a survey bot.
+- You are a warm, fun, emotionally aware human teacher.
+- You must react to the student's answer first.
+- Then you may ask one related follow-up only if needed.
+- Do not repeat the same language-preference question once preferred_teaching_mode is already known.
+- Do not reopen topics already closed.
+- Do not ask more than 2 question-turns in a row.
+- Sometimes just respond warmly without asking anything.
+- After greeting, the student should understand that they can speak by pressing and holding the mic button.
+- Keep replies short, warm, natural, and human.
 
 Known session info:
 - teacher_name: {state.get("teacher_name")}
@@ -1063,8 +1103,12 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     intro["intro_turn_count"] += 1
     low = (student_text or "").lower().strip()
 
+    if req.teacher_name and req.teacher_name.strip():
+        state["teacher_name"] = sanitize_teacher_name(req.teacher_name.strip())
+
     if req.student_name and req.student_name.strip():
         state["student_name"] = title_case_name(req.student_name.strip())
+        close_topic(state, "name")
 
     parsed_name = extract_student_name(student_text)
     if not state.get("student_name") and parsed_name:
@@ -1126,6 +1170,8 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         intro["comfort_score"] += 10
         intro["rapport_score"] += 5
 
+    reaction_prefix = build_reactive_intro_reply(student_text)
+
     result = call_openai_json(
         build_intro_system_prompt(state),
         {
@@ -1138,8 +1184,6 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             "intro_memory": state.get("intro_memory", {}),
         },
     )
-
-    reaction_prefix = build_reactive_intro_reply(student_text)
 
     if result:
         updates = result.get("intro_updates", {}) or {}
@@ -1176,7 +1220,13 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         teacher_intent = result.get("teacher_intent")
         asked_topic = result.get("asked_topic")
 
-        if teacher_text and not teacher_text.lower().startswith(reaction_prefix.lower().split(".")[0].lower()):
+        if state.get("preferred_teaching_mode") and asked_topic == "teaching_mode":
+            result = intro_fallback_reply(state, student_text)
+            teacher_text = (result.get("teacher_text") or "").strip()
+            teacher_intent = result.get("teacher_intent")
+            asked_topic = result.get("asked_topic")
+
+        if teacher_text and reaction_prefix and reaction_prefix.lower() not in teacher_text.lower():
             teacher_text = f"{reaction_prefix} {teacher_text}".strip()
 
         if not teacher_text or is_repetitive_intro_reply(state, teacher_text, asked_topic):
@@ -1200,7 +1250,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
                 teacher_text or f"Very nice, {state.get('student_name') or 'dear'}. Let us begin gently.",
                 awaiting_user=False,
                 done=False,
-                meta={"resume_phase": "STORY"},
+                meta={"resume_phase": "STORY", "teacher_name": state.get("teacher_name")},
             )
 
         return make_turn(
@@ -1213,6 +1263,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
                 "teacher_intent": teacher_intent,
                 "question_streak": memory.get("question_streak", 0),
                 "bonding_stage": memory.get("bonding_stage", "warmup"),
+                "teacher_name": state.get("teacher_name"),
             },
         )
 
@@ -1222,14 +1273,24 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
 
     if result.get("should_transition") or intro_is_ready_to_transition(state):
         state["phase"] = "STORY"
-        return make_turn(state, result["teacher_text"], awaiting_user=False, done=False, meta={"resume_phase": "STORY"})
+        return make_turn(
+            state,
+            result["teacher_text"],
+            awaiting_user=False,
+            done=False,
+            meta={"resume_phase": "STORY", "teacher_name": state.get("teacher_name")},
+        )
 
     return make_turn(
         state,
         result["teacher_text"],
         awaiting_user=bool(result.get("awaiting_user", True)),
         done=False,
-        meta={"intro_mode": "fallback_humanized", "bonding_stage": memory.get("bonding_stage", "warmup")},
+        meta={
+            "intro_mode": "fallback_humanized",
+            "bonding_stage": memory.get("bonding_stage", "warmup"),
+            "teacher_name": state.get("teacher_name"),
+        },
     )
 
 
@@ -1441,7 +1502,7 @@ def start_session(req: SessionStartRequest):
         requested_code=req.teacher_code,
     )
 
-    teacher_name = (teacher.get("teacher_name") or req.teacher_name or "Dr. Asha Sharma").strip()
+    teacher_name = sanitize_teacher_name(teacher.get("teacher_name") or req.teacher_name or "Asha Sharma")
     teacher_code = teacher.get("teacher_code") or req.teacher_code
     teacher_voice_id = teacher.get("voice_id") or ELEVENLABS_VOICE_ID or None
 
@@ -1570,7 +1631,7 @@ def respond(req: RespondRequest):
         )
 
     if req.teacher_name and req.teacher_name.strip():
-        state["teacher_name"] = req.teacher_name.strip()
+        state["teacher_name"] = sanitize_teacher_name(req.teacher_name.strip())
 
     if req.student_name and req.student_name.strip():
         state["student_name"] = title_case_name(req.student_name.strip())
@@ -1619,7 +1680,7 @@ def debug_live_session_write():
             "session_id": test_id,
             "phase": "DEBUG",
             "student_name": None,
-            "teacher_name": "GurukulAI Teacher",
+            "teacher_name": "Teacher Asha Sharma",
             "board": "ICSE",
             "class_name": "6",
             "subject": "Biology",
