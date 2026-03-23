@@ -14,7 +14,7 @@ from openai import OpenAI
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="10.0")
+app = FastAPI(title="GurukulAI Backend", version="10.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -920,6 +920,9 @@ def is_repetitive_intro_reply(state: Dict[str, Any], teacher_text: str, asked_to
         "which language",
         "full english, hindi-english mix",
         "very natural",
+        "press and hold the mic button",
+        "mic will become manual",
+        "mic button is just below this screen",
     ]
 
     for p in repeated_patterns:
@@ -980,7 +983,6 @@ def extract_interest_memory(student_text: str) -> Dict[str, Any]:
     low = student_text.lower()
     out: Dict[str, Any] = {}
 
-    # favorite food
     for food in FOOD_FACTS.keys():
         if food in low:
             out["favorite_food"] = food
@@ -1140,19 +1142,10 @@ def intro_fallback_reply(state: Dict[str, Any], student_text: str) -> Dict[str, 
             "should_transition": False,
         }
 
-    if "mic_instruction" not in closed_topics:
-        close_topic(state, "mic_instruction")
-        return {
-            "teacher_text": f"{reaction} And remember, whenever you want to speak, just press and hold the mic button, speak comfortably, and release it. I will listen to you.",
-            "teacher_intent": "build_comfort",
-            "asked_topic": None,
-            "awaiting_user": True,
-            "should_transition": False,
-        }
-
     if not state.get("student_name") and "name" not in closed_topics:
+        mark_topic_asked(state, "name")
         return {
-            "teacher_text": f"{reaction} By the way, tell me your full name once nicely.",
+            "teacher_text": f"{reaction} Now tell me your full name once nicely.",
             "teacher_intent": "ask_name",
             "asked_topic": "name",
             "awaiting_user": True,
@@ -1160,8 +1153,9 @@ def intro_fallback_reply(state: Dict[str, Any], student_text: str) -> Dict[str, 
         }
 
     if not state.get("preferred_teaching_mode") and "teaching_mode" not in closed_topics:
+        mark_topic_asked(state, "teaching_mode")
         return {
-            "teacher_text": f"{reaction} Now tell me one thing — should I teach you in full English, Hindi-English mix, or with a little home-language support?",
+            "teacher_text": f"{reaction} Tell me one thing — when I teach you, what feels easiest for you: full English, Hindi-English mix, or support with your home language too?",
             "teacher_intent": "ask_learning_mode",
             "asked_topic": "teaching_mode",
             "awaiting_user": True,
@@ -1305,12 +1299,8 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
             subject=subject,
             chapter=chapter,
         ),
-        "Whenever you want to speak, just press and hold the mic button, speak comfortably, and then release it. I will stop and listen to you.",
-        random.choice([
-            "Before we begin, tell me a little about how your day has been.",
-            "Before class starts, tell me how you are feeling today.",
-            "No hurry at all. First tell me how your day has been so far.",
-        ]),
+        "Before we begin, one important thing. Right now during our intro conversation, your mic is always active. If you speak, I will stop and listen to you immediately. Later, when I start teaching, the mic will become manual, and then you will need to press and hold the mic button to speak with me. The mic button is just below this screen in the center.",
+        "Now first tell me your full name once nicely.",
     ]
 
     story_chunks = [
@@ -1405,12 +1395,12 @@ VERY IMPORTANT:
 - You must react to the student's answer first.
 - Then you may ask one related follow-up only if needed.
 - Do not repeat the same language-preference question once preferred_teaching_mode is already known.
+- Do not repeat mic usage explanation again after it has already been explained.
 - Do not reopen topics already closed.
 - Do not ask more than 2 question-turns in a row.
 - Sometimes just respond warmly without asking anything.
 - Ask random small-talk topics like food, games, sports, home language, cartoons, family cooking.
 - Do not use the exact same phrase repeatedly.
-- After greeting, the student should understand that they can speak by pressing and holding the mic button.
 - Keep replies short, warm, natural, and human.
 - If the student asks about you, answer consistently from teacher_persona.
 - Do not sound like AI.
@@ -1574,7 +1564,6 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     interest_patch = extract_interest_memory(student_text)
     merge_student_memory(state, interest_patch)
 
-    # family cooking memory
     if "mother" in low or "mom" in low or "mummy" in low or "father" in low or "dad" in low or "grandmother" in low or "grandma" in low:
         student_memory = state.setdefault("student_memory", {})
         family_context = student_memory.setdefault("family_context", {})
@@ -1624,7 +1613,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         if guessed:
             intro["guessed_language"] = guessed
 
-    if any(x in low for x in ["ready", "let's start", "lets start", "begin", "yes teacher", "start class"]):
+    if any(x in low for x in ["ready", "let's start", "lets start", "begin", "yes teacher"]):
         intro["ready_to_start"] = True
         intro["comfort_score"] += 10
         intro["rapport_score"] += 5
@@ -1876,7 +1865,12 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
 
         if idx < len(chunks):
             state["intro_index"] = idx + 1
+
+            if idx == 1:
+                close_topic(state, "mic_instruction")
+
             awaiting = idx >= 2
+
             return make_turn(
                 state,
                 chunks[idx],
