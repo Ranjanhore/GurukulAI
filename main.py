@@ -2,7 +2,6 @@ import os
 import json
 import uuid
 import random
-import re
 from typing import Optional, Any, Dict, List
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
@@ -12,7 +11,7 @@ from pydantic import BaseModel
 from supabase import create_client, Client
 from openai import OpenAI
 
-app = FastAPI(title="GurukulAI Backend", version="10.2")
+app = FastAPI(title="GurukulAI Backend", version="10.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -115,7 +114,9 @@ PRONUNCIATION_MAP = {
     "Asha Sharma": "Asha Shar-maa",
     "Biology": "Bye-ol-uh-jee",
     "photosynthesis": "fo-toh-sin-thuh-sis",
+    "Photosynthesis": "fo-toh-sin-thuh-sis",
     "chlorophyll": "klaw-ro-fill",
+    "Chlorophyll": "klaw-ro-fill",
     "lamina": "la-mi-na",
     "stomata": "stoh-may-ta",
     "venation": "vee-nay-shun",
@@ -185,35 +186,25 @@ def title_case_name(name: str) -> str:
 def pretty_language(value: Optional[str]) -> str:
     raw = (value or "Hinglish").strip()
     low = raw.lower()
-    if "hinglish" in low:
+    mapping = {
+        "hinglish": "Hinglish",
+        "english": "English",
+        "hindi": "Hindi",
+        "bengali": "Bengali",
+        "bangla": "Bengali",
+        "tamil": "Tamil",
+        "telugu": "Telugu",
+        "marathi": "Marathi",
+        "gujarati": "Gujarati",
+        "malayalam": "Malayalam",
+        "kannada": "Kannada",
+        "punjabi": "Punjabi",
+        "odia": "Odia",
+        "assamese": "Assamese",
+    }
+    if "english" in low and "hindi" in low:
         return "Hinglish"
-    if "hindi" in low and "english" in low:
-        return "Hinglish"
-    if "english" in low:
-        return "English"
-    if "hindi" in low:
-        return "Hindi"
-    if "bengali" in low or "bangla" in low:
-        return "Bengali"
-    if "tamil" in low:
-        return "Tamil"
-    if "telugu" in low:
-        return "Telugu"
-    if "marathi" in low:
-        return "Marathi"
-    if "gujarati" in low:
-        return "Gujarati"
-    if "malayalam" in low:
-        return "Malayalam"
-    if "kannada" in low:
-        return "Kannada"
-    if "punjabi" in low:
-        return "Punjabi"
-    if "odia" in low:
-        return "Odia"
-    if "assamese" in low:
-        return "Assamese"
-    return raw or "Hinglish"
+    return mapping.get(low, raw or "Hinglish")
 
 def sanitize_teacher_name(name: Optional[str]) -> str:
     raw = str(name or "").strip()
@@ -249,14 +240,13 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
     try:
         return json.loads(text)
     except Exception:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start:end + 1])
-        except Exception:
-            return {}
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                pass
     return {}
 
 def speech_text(text: str) -> str:
@@ -264,15 +254,6 @@ def speech_text(text: str) -> str:
     for k, v in PRONUNCIATION_MAP.items():
         out = out.replace(k, v)
     out = out.replace("—", ", ").replace(";", ", ")
-    return out
-
-def uniq_keep_order(items: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for item in items:
-        if item and item not in seen:
-            seen.add(item)
-            out.append(item)
     return out
 
 def save_live_session(state: Dict[str, Any]) -> None:
@@ -376,7 +357,6 @@ def upsert_student_brain_memory(state: Dict[str, Any]) -> None:
         "confidence_score": state.get("confidence_score", 50),
         "stress_score": state.get("stress_score", 20),
         "xp_score": state.get("xp", 0),
-        "estimated_iq_score": memory.get("estimated_iq_score"),
         "english_correction_level": memory.get("english_correction_level"),
         "parent_guidance_notes": memory.get("parent_guidance_notes"),
         "known_facts": memory.get("known_facts", {}),
@@ -418,7 +398,6 @@ def insert_progress_log(state: Dict[str, Any], teacher_feedback: str = "", paren
             "confidence_score": state.get("confidence_score", 50),
             "stress_score": state.get("stress_score", 20),
             "xp_score": state.get("xp", 0),
-            "estimated_iq_score": memory.get("estimated_iq_score"),
             "english_improvement_score": memory.get("english_improvement_score", 0),
             "regional_language_improvement_score": memory.get("regional_language_improvement_score", 0),
             "attention_score": memory.get("attention_score", 0),
@@ -501,7 +480,9 @@ def detect_preferred_teaching_mode(text: str) -> Optional[str]:
         return "Hinglish"
     if "english" in low and "hindi" in low:
         return "Hinglish"
-    if "only english" in low or "full english" in low:
+    if "full english" in low or "only english" in low:
+        return "English"
+    if "english" in low and not any(x in low for x in ["weak english", "poor english"]):
         return "English"
     if "hindi" in low:
         return "Hindi"
@@ -525,6 +506,11 @@ def detect_preferred_teaching_mode(text: str) -> Optional[str]:
         return "Odia"
     if "assamese" in low:
         return "Assamese"
+
+    words = len(low.split())
+    english_chars = sum(1 for c in low if "a" <= c <= "z")
+    if words >= 8 and english_chars > 20:
+        return "English"
     return None
 
 def choose_phrase_variant(state: Dict[str, Any], family: str) -> str:
@@ -557,14 +543,6 @@ def adjust_student_signals(state: Dict[str, Any], text: str) -> None:
     else:
         state["confidence_score"] = min(100.0, float(state.get("confidence_score", 50.0)) + 2.0)
 
-def understanding_signal(text: str) -> str:
-    low = text.lower()
-    if any(x in low for x in ["don't understand", "dont understand", "confused", "again", "repeat", "not clear", "nahi samjha"]):
-        return "confused"
-    if any(x in low for x in ["yes", "got it", "clear", "understood", "samajh gaya", "samajh gayi"]):
-        return "understood"
-    return "neutral"
-
 def close_topic(state: Dict[str, Any], topic: str) -> None:
     memory = state.setdefault("intro_memory", {})
     closed = memory.setdefault("closed_topics", [])
@@ -592,12 +570,9 @@ def extract_interest_memory(student_text: str) -> Dict[str, Any]:
         if game in low:
             out["favorite_game"] = game
             break
-    if "english" in low:
-        out["preferred_language"] = "English"
-    if "hinglish" in low:
-        out["preferred_language"] = "Hinglish"
-    if "hindi" in low and "hinglish" not in low:
-        out["preferred_language"] = "Hindi"
+    lang = detect_preferred_teaching_mode(student_text)
+    if lang:
+        out["preferred_language"] = lang
     return out
 
 def merge_student_memory(state: Dict[str, Any], patch: Dict[str, Any]) -> None:
@@ -632,6 +607,25 @@ def teacher_personal_answer(state: Dict[str, Any], student_text: str) -> Optiona
         hobby_list = hobbies.get("hobbies", ["reading", "storytelling"])
         return f"In my free time I enjoy {', '.join(hobby_list[:2])}."
     return None
+
+def detect_low_english(text: str) -> bool:
+    low = text.lower().strip()
+    weak_patterns = [
+        "i goed", "he go", "she go", "i am understanding", "i no understand", "i not know",
+        "me like", "i not able", "i no like",
+    ]
+    return any(p in low for p in weak_patterns)
+
+def maybe_gentle_language_model(state: Dict[str, Any], student_text: str) -> Optional[str]:
+    if not detect_low_english(student_text):
+        return None
+    state.setdefault("student_memory", {})["english_correction_level"] = "gentle_support"
+    state["student_memory"]["english_improvement_score"] = int(state["student_memory"].get("english_improvement_score", 0)) + 1
+    return "Small English help for you: say it this way once more in a smoother sentence. Good try though, you are learning nicely."
+
+def preferred_explanation_style(state: Dict[str, Any]) -> str:
+    pref = state.get("preferred_teaching_mode") or state.get("student_memory", {}).get("preferred_language") or state.get("language")
+    return pretty_language(pref)
 
 def intro_followup_after_reaction(state: Dict[str, Any], student_text: str) -> str:
     next_topic = choose_next_intro_topic(state)
@@ -714,7 +708,11 @@ def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject
 def generate_lesson_content(board: str, class_name: str, subject: str, chapter: str, teacher_name: str) -> Dict[str, Any]:
     return {
         "intro_chunks": [
-            random.choice(CASUAL_INTRO_OPENERS).format(teacher_name=teacher_name, subject=subject, chapter=chapter),
+            random.choice([
+                f"Hello my dear, I am {teacher_name}. I’ll be with you through this class in a warm and friendly way.",
+                f"Hi sweetheart, I’m {teacher_name}. We’ll make this class warm and easy together.",
+                f"Hello dear, I’m {teacher_name}. Let us make this class feel easy and natural together.",
+            ]),
             "Before we begin, one important thing. Right now during our intro conversation, your mic is always active. If you speak, I will stop and listen to you immediately. Later, when I start teaching, the mic will become manual, and then you will need to press and hold the mic button to speak with me. The mic button is just below this screen in the center.",
             "Now first tell me your full name once nicely.",
         ],
@@ -763,45 +761,6 @@ def call_openai_json(system_prompt: str, payload: Dict[str, Any]) -> Dict[str, A
     except Exception:
         return {}
 
-def build_intro_system_prompt(state: Dict[str, Any]) -> str:
-    guessed = state.get("intro_profile", {}).get("guessed_language")
-    guessed_lines = LANGUAGE_GREETING_SAMPLES.get(guessed or "", [])
-    return f"""
-You are GurukulAI Teacher in INTRO mode only.
-
-Rules:
-- Speak like a warm Indian teacher.
-- Do not repeat mic explanation again after it has already been spoken.
-- Ask name if missing.
-- Ask teaching language preference if missing.
-- Keep answers short and human.
-- Sometimes use mixed English + Hindi if student is not strong in English.
-- If student speaks fluent English, continue in English.
-- If student speaks weak English, gently model correct English in a friendly way.
-- You may use tiny safe lines in regional language if it helps comfort.
-
-Known state:
-teacher_name={state.get("teacher_name")}
-student_name={state.get("student_name")}
-preferred_teaching_mode={state.get("preferred_teaching_mode")}
-intro_memory={json.dumps(state.get("intro_memory", {}), ensure_ascii=False)}
-student_memory={json.dumps(state.get("student_memory", {}), ensure_ascii=False)}
-teacher_persona={json.dumps(state.get("teacher_persona", {}), ensure_ascii=False)}
-greeting_samples={json.dumps(guessed_lines, ensure_ascii=False)}
-
-Return valid JSON only:
-{{
-  "teacher_text": "string",
-  "teacher_intent": "string",
-  "asked_topic": null,
-  "awaiting_user": true,
-  "should_transition": false,
-  "student_name": null,
-  "preferred_teaching_mode": null,
-  "intro_updates": {{}}
-}}
-""".strip()
-
 def build_teach_system_prompt(context: Dict[str, Any]) -> str:
     return f"""
 You are GurukulAI Teacher in guided teaching mode.
@@ -809,16 +768,14 @@ You are GurukulAI Teacher in guided teaching mode.
 Rules:
 - Stay grounded in the current chunk.
 - If student is weak in English, explain in mixed English + Hindi or English + regional support.
-- If student says incorrect English, gently give the correct sentence once, then continue teaching kindly.
+- If student says incorrect English, gently give the correct sentence once, then continue kindly.
 - Keep answers concise and supportive.
 - If the question is irrelevant, redirect gently.
 
 Return only JSON:
 {{
   "teacher_text": "string",
-  "action": "continue" | "recap" | "check_understanding",
-  "confidence_delta": 0,
-  "stress_delta": 0
+  "action": "continue" | "recap" | "check_understanding"
 }}
 
 Context:
@@ -837,12 +794,12 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         state["student_name"] = parsed_name
         close_topic(state, "name")
 
-    parsed_mode = detect_preferred_teaching_mode(student_text)
-    if parsed_mode:
-        state["preferred_teaching_mode"] = parsed_mode
+    lang = detect_preferred_teaching_mode(student_text)
+    if lang:
+        state["preferred_teaching_mode"] = lang
+        state.setdefault("student_memory", {})["preferred_language"] = lang
+        state["student_memory"]["strongest_language"] = lang
         close_topic(state, "language_pref")
-        state.setdefault("student_memory", {})["preferred_language"] = parsed_mode
-        state["student_memory"]["strongest_language"] = parsed_mode
 
     merge_student_memory(state, extract_interest_memory(student_text))
 
@@ -862,32 +819,35 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             intro["guessed_language"] = guessed
             state.setdefault("student_memory", {})["home_language"] = guessed
 
+    personal = teacher_personal_answer(state, student_text)
+    if personal:
+        return make_turn(state, personal, True, False)
+
     reaction = build_reactive_intro_reply(state, student_text)
 
     if not state.get("student_name"):
-        text = f"{reaction} Now tell me your full name once nicely."
-        return make_turn(state, text, True, False)
+        return make_turn(state, f"{reaction} Now tell me your full name once nicely.", True, False)
 
     if not state.get("preferred_teaching_mode"):
-        text = f"{reaction} Tell me one thing — when I teach you, what feels easiest for you: full English, Hindi-English mix, or support with your home language too?"
-        return make_turn(state, text, True, False)
+        return make_turn(state, f"{reaction} Tell me one thing — when I teach you, what feels easiest for you: full English, Hindi-English mix, or support with your home language too?", True, False)
 
-    text = intro_followup_after_reaction(state, student_text)
-    upsert_student_brain_memory(state)
+    # lighter writes: only every 3 intro turns or if new facts arrived
+    if intro["intro_turn_count"] % 3 == 0:
+        upsert_student_brain_memory(state)
 
     if intro_is_ready_to_transition(state):
         state["phase"] = "STORY"
         state["story_chunks"] = build_story_from_student_memory(state, state.get("chapter", ""), state.get("subject", ""))
-        return make_turn(state, text, False, False, {"resume_phase": "STORY"})
+        return make_turn(state, choose_phrase_variant(state, "comfort") or "Good, let us begin gently.", False, False, {"resume_phase": "STORY"})
 
-    return make_turn(state, text, True, False)
+    return make_turn(state, intro_followup_after_reaction(state, student_text), True, False)
 
 def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) -> TurnResponse:
-    low = text.lower()
-    if any(x in low for x in ["i goed", "i goed to", "he go", "she go", "i am understanding", "i goed school"]):
-        correction = "A small English correction for you: instead of that, you can say it like this more naturally. Good try though."
+    correction = maybe_gentle_language_model(state, text)
+    if correction:
         return make_turn(state, correction, True, False, {"teach_action": "english_correction"})
 
+    pref = preferred_explanation_style(state)
     context = {
         "teacher_name": state.get("teacher_name"),
         "teacher_persona": state.get("teacher_persona", {}),
@@ -896,7 +856,7 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
         "subject": state.get("subject"),
         "chapter": state.get("chapter"),
         "phase": state.get("phase"),
-        "preferred_teaching_mode": state.get("preferred_teaching_mode"),
+        "preferred_teaching_mode": pref,
         "student_memory": state.get("student_memory", {}),
         "student_text": text,
     }
@@ -905,8 +865,13 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
     if result and result.get("teacher_text"):
         return make_turn(state, result["teacher_text"], False, False, {"teach_action": result.get("action", "continue")})
 
-    if "photosynthesis" in low:
-        return make_turn(state, "Photosynthesis means the process by which plants make their own food using sunlight, water, and carbon dioxide.", False, False)
+    if "photosynthesis" in text.lower():
+        if pref == "English":
+            msg = "Photosynthesis is the process by which plants make their own food using sunlight, water, and carbon dioxide."
+        else:
+            msg = "Photosynthesis means plants make their own food using sunlight, water, and carbon dioxide. Simple language mein, plant apna khana khud banata hai."
+        return make_turn(state, msg, False, False)
+
     return make_turn(state, "Good question. Let us continue together.", False, False)
 
 def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
@@ -944,7 +909,7 @@ def answer_during_homework(state: Dict[str, Any], text: str) -> TurnResponse:
     parent_summary = "Student participated with improving confidence."
     parent_strengths = "Curiosity, participation, and response effort."
     parent_focus = "Continue language confidence and concept clarity."
-    teacher_suggestions = "Use warm mixed-language explanation and short recap checks."
+    teacher_suggestions = "Use warm mixed-language explanation, gentle correction, and short recap checks."
     parent_suggestions = "Encourage the child to speak in full sentences daily and revise in short sessions."
 
     insert_progress_log(state, teacher_feedback=teacher_suggestions, parent_feedback=parent_suggestions)
@@ -1066,7 +1031,6 @@ def start_session(req: SessionStartRequest):
             "chapter_likes": existing_student_memory.get("chapter_likes", []),
             "chapter_dislikes": existing_student_memory.get("chapter_dislikes", []),
             "communication_improvement_score": existing_student_memory.get("communication_improvement_score", 0),
-            "estimated_iq_score": existing_student_memory.get("estimated_iq_score"),
             "english_correction_level": existing_student_memory.get("english_correction_level"),
             "english_improvement_score": existing_student_memory.get("english_improvement_score", 0),
             "regional_language_improvement_score": existing_student_memory.get("regional_language_improvement_score", 0),
