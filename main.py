@@ -14,7 +14,7 @@ from openai import OpenAI
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="9.1")
+app = FastAPI(title="GurukulAI Backend", version="9.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,8 +32,8 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 LIVE_SESSION_TABLE = os.getenv("LIVE_SESSION_TABLE", "live_sessions").strip()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip()
-OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "3"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
+OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "2.5"))
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
@@ -121,15 +121,9 @@ FOOD_FACTS = {
 }
 
 CASUAL_INTRO_OPENERS = [
-    "Hello my dear, I am {teacher_name}. I’ll be with you through this class in a friendly way.",
+    "Hello my dear, I am {teacher_name}. I’ll be with you through this class in a warm and friendly way.",
     "Hi sweetheart, I’m {teacher_name}. I’ll stay with you gently through this class.",
     "Hello, I’m {teacher_name}. We’ll make this class warm and easy together.",
-]
-
-LANGUAGE_MODE_PROMPTS = [
-    "Now tell me one thing — should I teach you in full English, Hindi-English mix, or with a little home-language support?",
-    "Tell me your comfort style — full English, Hinglish, or a mix with your home language?",
-    "How should I teach you so it feels easiest — English, Hindi-English mix, or your regional language mixed with English?",
 ]
 
 REACTION_PREFIXES = {
@@ -186,6 +180,13 @@ PRONUNCIATION_MAP = {
     "multiplication": "mul-ti-pli-kay-shun",
     "geography": "jee-og-ruh-fee",
     "biology": "bye-ol-uh-jee",
+    "petiole": "pet-ee-ole",
+    "veinlet": "vain-let",
+    "veins": "vains",
+    "carbon dioxide": "car-bun dye-oxide",
+    "parallel": "para-lel",
+    "kitchen": "kit-chen",
+    "grandmother": "gran-muh-ther",
 }
 
 # =========================================================
@@ -409,6 +410,7 @@ def pick_teacher_from_db(
             )
             item = first_or_none(row.data)
             if item:
+                item["teacher_name"] = sanitize_teacher_name(item.get("teacher_name"))
                 return item
 
         if requested_name:
@@ -739,17 +741,6 @@ def intro_fallback_reply(state: Dict[str, Any], student_text: str) -> Dict[str, 
             "should_transition": False,
         }
 
-    food_fact = detect_food_fact(student_text)
-    if food_fact and "food" not in closed_topics:
-        close_topic(state, "food")
-        return {
-            "teacher_text": f"{reaction} I like how naturally you are talking now.",
-            "teacher_intent": "respond_emotionally",
-            "asked_topic": None,
-            "awaiting_user": True,
-            "should_transition": False,
-        }
-
     if not state.get("student_name") and "name" not in closed_topics:
         return {
             "teacher_text": f"{reaction} By the way, tell me your full name once nicely.",
@@ -875,10 +866,11 @@ def intro_is_ready_to_transition(state: Dict[str, Any]) -> bool:
     rapport = int(intro.get("rapport_score", 0))
     mode = state.get("preferred_teaching_mode")
     stage = memory.get("bonding_stage", "warmup")
+
     return (
         stage == "ready_to_transition"
-        or turns >= 8
-        or (comfort >= 60 and rapport >= 45 and bool(mode))
+        or turns >= 12
+        or (turns >= 10 and comfort >= 62 and rapport >= 48 and bool(mode))
         or intro.get("ready_to_start") is True
     )
 
@@ -890,18 +882,26 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
             subject=subject,
             chapter=chapter,
         ),
-        "Whenever you want to speak, press and hold the mic button, speak comfortably, and then release it. I will listen to you.",
+        "Whenever you want to speak, just press and hold the mic button, speak comfortably, and then release it. I will stop and listen to you.",
         random.choice([
             "Before we begin, tell me a little about how your day has been.",
             "Before class starts, tell me how you are feeling today.",
             "No hurry at all. First tell me how your day has been so far.",
         ]),
     ]
+
     story_chunks = [
-        f"Imagine you are walking through a green garden. Leaves are silently working like tiny food factories. That is why the chapter {chapter} is so important.",
-        f"In {subject}, a leaf is not just a green part of a plant. It helps the plant prepare food, exchange gases, and support life on Earth.",
-        "So today we will understand structure, function, and why leaves matter in daily life.",
+        "Let me tell you a small story first. Imagine a class 6 student walking home from school on a warm afternoon, feeling a little hungry and tired.",
+        "On the way, that student stops near a tree for shade. The air feels cooler there, and the leaves above move softly in the wind.",
+        "The student notices something simple but interesting. Even though the leaves are quiet, they seem busy in their own way.",
+        "A grandmother nearby smiles and says, these leaves are like tiny kitchen workers. They keep making food for the plant without any noise.",
+        "The student gets curious. How can a leaf make food? It does not have hands, fire, or utensils like a kitchen at home.",
+        "Then the grandmother points at sunlight falling on the leaves and says, nature has its own magical systems, and leaves are one of the smartest parts of a plant.",
+        "Now the student starts looking closely. Some leaves are broad, some are thin, some have clear vein patterns, and all of them seem to be doing an important job.",
+        "That is exactly what we are going to understand today — how a leaf looks simple from outside, but inside it is doing powerful work for the plant every day.",
+        f"So before we study the chapter {chapter}, keep this little picture in your mind: a quiet leaf, sunlight, air, and a plant depending on that leaf like a family depends on its kitchen.",
     ]
+
     teach_chunks = [
         "A typical leaf has three main visible parts: leaf base, petiole, and lamina. The lamina is the broad flat green part.",
         "Inside the leaf there are veins and veinlets. These help in transport of water, minerals, and prepared food.",
@@ -910,6 +910,7 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
         "Leaves can have different venation patterns like reticulate venation and parallel venation.",
         "So a leaf is both a kitchen and a breathing surface for the plant.",
     ]
+
     quiz_questions = [
         {
             "question": "What is the broad flat green part of a leaf called?",
@@ -922,10 +923,12 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
             "explanation": "Chlorophyll is the pigment that absorbs sunlight for photosynthesis.",
         },
     ]
+
     homework_items = [
         "Draw a neat diagram of a leaf and label leaf base, petiole, lamina, and veins.",
         "Observe two leaves at home and write whether their venation is parallel or reticulate.",
     ]
+
     return {
         "intro_chunks": intro_chunks,
         "story_chunks": story_chunks,
@@ -1043,7 +1046,12 @@ Your job:
 - adapt to student confidence and stress
 - speak like a warm Indian teacher
 - keep answers concise and clear
-- use simple explanation, analogy, recap, or quick check depending on student need
+- if the student interrupts with a relevant question, answer it politely and clearly
+- if the student asks something irrelevant, respond gently, warmly, and redirect focus without sounding harsh
+- use calm, supportive, speech-therapy-like pacing for attention and focus restoration
+- do not act like a doctor, therapist, or psychiatrist
+- do not diagnose the student
+- be emotionally regulating, polite, and encouraging
 
 Rules:
 - preserve subject correctness
@@ -1051,6 +1059,7 @@ Rules:
 - if the student seems confused, simplify
 - if the student seems to understand, reinforce briefly and continue
 - you may ask one tiny understanding check
+- if redirecting, do it kindly and briefly
 
 Return only JSON:
 {{
@@ -1327,12 +1336,22 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
         return make_turn(state, teacher_text, awaiting_user=False, done=False, meta={"teach_action": action})
 
     low = text.lower()
+
     if "what is lamina" in low:
         return make_turn(state, "Lamina is the broad flat green part of a leaf.", awaiting_user=False, done=False)
     if "stomata" in low:
         return make_turn(state, "Stomata are tiny openings on the leaf surface that help in gas exchange and transpiration.", awaiting_user=False, done=False)
     if "photosynthesis" in low:
         return make_turn(state, "Photosynthesis is the process by which plants make food using sunlight, water, and carbon dioxide.", awaiting_user=False, done=False)
+
+    if any(x in low for x in ["game", "cartoon", "mobile", "later", "not now", "bored"]):
+        return make_turn(
+            state,
+            "That is okay dear. Let us keep our mind here for a little while, and I will make this simple and easy for you.",
+            awaiting_user=False,
+            done=False,
+            meta={"teach_action": "gentle_redirect"},
+        )
 
     food_fact = detect_food_fact(text)
     if food_fact:
@@ -1388,10 +1407,25 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
     if phase == "INTRO":
         idx = int(state.get("intro_index", 0))
         chunks = state.get("intro_chunks", [])
+
         if idx < len(chunks):
             state["intro_index"] = idx + 1
-            return make_turn(state, chunks[idx], awaiting_user=True, done=False, meta={"intro_index": idx})
-        return make_turn(state, "Now tell me a little about yourself before we begin.", awaiting_user=True, done=False, meta={"intro_index": idx})
+            awaiting = idx >= 2
+            return make_turn(
+                state,
+                chunks[idx],
+                awaiting_user=awaiting,
+                done=False,
+                meta={"intro_index": idx},
+            )
+
+        return make_turn(
+            state,
+            "Now tell me a little about yourself before we begin.",
+            awaiting_user=True,
+            done=False,
+            meta={"intro_index": idx},
+        )
 
     if phase == "STORY":
         idx = int(state.get("story_index", 0))
