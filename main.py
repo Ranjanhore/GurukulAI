@@ -14,7 +14,10 @@ from supabase import create_client, Client
 from openai import OpenAI
 
 
-app = FastAPI(title="GurukulAI Backend", version="10.7")
+# =========================================================
+# App
+# =========================================================
+app = FastAPI(title="GurukulAI Backend", version="11.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,6 +27,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# =========================================================
+# Env
+# =========================================================
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 LIVE_SESSION_TABLE = os.getenv("LIVE_SESSION_TABLE", "live_sessions").strip()
@@ -46,6 +52,9 @@ if OPENAI_API_KEY:
 OPENAI_POOL = ThreadPoolExecutor(max_workers=6)
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
+# =========================================================
+# Static Data
+# =========================================================
 REGIONAL_GUESS_MAP = {
     "chatterjee": "Bengali",
     "banerjee": "Bengali",
@@ -80,20 +89,6 @@ REGIONAL_GUESS_MAP = {
     "baruah": "Assamese",
     "hegde": "Kannada",
     "gowda": "Kannada",
-}
-
-LANGUAGE_GREETING_SAMPLES = {
-    "Bengali": ["Ki khobor?", "Bhalo acho?", "Darun!"],
-    "Hindi": ["Kaise ho beta?", "Sab theek?", "Bahut badhiya."],
-    "Tamil": ["Eppadi irukka?"],
-    "Telugu": ["Ela unnava?"],
-    "Marathi": ["Kasa ahes?"],
-    "Gujarati": ["Kem cho?"],
-    "Punjabi": ["Ki haal aa?"],
-    "Malayalam": ["Sugham alle?"],
-    "Kannada": ["Hegiddiya?"],
-    "Odia": ["Kemiti achha?"],
-    "Assamese": ["Kene aso?"],
 }
 
 LANGUAGE_MIX_LINES = {
@@ -212,6 +207,7 @@ PRONUNCIATION_MAP_BENGALI = {
     "bhalo": "bhaa-lo",
     "acho": "aa-cho",
     "tumi": "tu-mi",
+    "porabo": "po-ra-bo",
     "porbo": "por-bo",
     "darun": "daa-roon",
     "ekdom": "ek-dom",
@@ -243,7 +239,9 @@ PRONUNCIATION_MAP_TELUGU = {
     "veldaam": "vel-daam",
 }
 
-
+# =========================================================
+# Models
+# =========================================================
 class SessionStartRequest(BaseModel):
     board: str
     class_name: Optional[str] = None
@@ -285,6 +283,9 @@ class TurnResponse(BaseModel):
     report: Optional[Dict[str, Any]] = None
 
 
+# =========================================================
+# Basic Helpers
+# =========================================================
 def normalize_class_name(value: Optional[str]) -> str:
     return str(value or "").replace("Class", "").replace("class", "").strip()
 
@@ -373,6 +374,13 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
     return {}
 
 
+def append_history(state: Dict[str, Any], role: str, text: str) -> None:
+    state.setdefault("history", []).append({"role": role, "text": text})
+
+
+# =========================================================
+# Pronunciation / Speech Helpers
+# =========================================================
 def apply_alias_map(text: str, alias_map: Dict[str, str]) -> str:
     out = text
     for original, spoken in alias_map.items():
@@ -402,6 +410,168 @@ def speech_text(text: str, language: str = "English") -> str:
     return build_speech_text(text, language)
 
 
+# =========================================================
+# Detection Helpers
+# =========================================================
+def extract_student_name(text: str) -> Optional[str]:
+    clean = text.strip()
+    patterns = ["my name is ", "i am ", "i'm ", "name is ", "mera naam "]
+    low = clean.lower()
+    for pattern in patterns:
+        if low.startswith(pattern):
+            return title_case_name(clean[len(pattern):].strip(" .,!"))
+
+    if len(clean.split()) <= 4 and clean.replace(" ", "").isalpha():
+        blocked = {
+            "english", "hindi", "hinglish", "bengali", "bangla", "tamil", "telugu",
+            "marathi", "gujarati", "malayalam", "kannada", "punjabi", "odia", "assamese",
+            "yes", "no", "ok", "okay"
+        }
+        if clean.lower() not in blocked:
+            return title_case_name(clean)
+
+    return None
+
+
+def detect_food_fact(text: str) -> Optional[str]:
+    low = text.lower()
+    for food, fact in FOOD_FACTS.items():
+        if food in low:
+            return fact
+    return None
+
+
+def guess_language_from_name(full_name: str) -> Optional[str]:
+    words = [w.strip(" .,!?").lower() for w in full_name.split() if w.strip()]
+    for word in reversed(words):
+        if word in REGIONAL_GUESS_MAP:
+            return REGIONAL_GUESS_MAP[word]
+    return None
+
+
+def detect_specific_language_name(text: str) -> Optional[str]:
+    low = text.lower()
+    language_map = {
+        "english": "English",
+        "hindi": "Hindi",
+        "hinglish": "Hinglish",
+        "bengali": "Bengali",
+        "bangla": "Bengali",
+        "tamil": "Tamil",
+        "telugu": "Telugu",
+        "marathi": "Marathi",
+        "gujarati": "Gujarati",
+        "malayalam": "Malayalam",
+        "kannada": "Kannada",
+        "punjabi": "Punjabi",
+        "odia": "Odia",
+        "assamese": "Assamese",
+    }
+    for key, value in language_map.items():
+        if key in low:
+            return value
+    return None
+
+
+def detect_special_language_request(text: str) -> Optional[str]:
+    low = text.lower().strip()
+    if "amra bangla te kotha bolte paari" in low or "bangla te kotha bolte pari" in low:
+        return "Bengali"
+    if "bangla te bolo" in low or "bangla bolo" in low:
+        return "Bengali"
+    if "hindi me bolo" in low or "hindi mein bolo" in low:
+        return "Hindi"
+    if "tamil la pesalama" in low or "tamil pesalama" in low:
+        return "Tamil"
+    if "telugu lo matladacha" in low or "telugu lo maatladacha" in low:
+        return "Telugu"
+    if "marathi madhe bolu" in low:
+        return "Marathi"
+    if "gujarati ma bolo" in low:
+        return "Gujarati"
+    return None
+
+
+def detect_preferred_teaching_mode(text: str) -> Optional[str]:
+    low = text.lower()
+    if "hinglish" in low:
+        return "Hinglish"
+    if "english" in low and "hindi" in low:
+        return "Hinglish"
+    if "full english" in low or "only english" in low:
+        return "English"
+    if "english" in low and not any(x in low for x in ["weak english", "poor english"]):
+        return "English"
+    if "hindi" in low:
+        return "Hindi"
+    if "bengali" in low or "bangla" in low:
+        return "Bengali"
+    if "tamil" in low:
+        return "Tamil"
+    if "telugu" in low:
+        return "Telugu"
+    if "marathi" in low:
+        return "Marathi"
+    if "gujarati" in low:
+        return "Gujarati"
+    if "malayalam" in low:
+        return "Malayalam"
+    if "kannada" in low:
+        return "Kannada"
+    if "punjabi" in low:
+        return "Punjabi"
+    if "odia" in low:
+        return "Odia"
+    if "assamese" in low:
+        return "Assamese"
+    return None
+
+
+def detect_low_english(text: str) -> bool:
+    low = text.lower().strip()
+    weak_patterns = [
+        "i goed",
+        "he go",
+        "she go",
+        "i am understanding",
+        "i no understand",
+        "i not know",
+        "me like",
+        "i not able",
+        "i no like",
+    ]
+    return any(p in low for p in weak_patterns)
+
+
+def detect_meaning_request(text: str) -> Optional[str]:
+    low = text.lower()
+    technical_words = ["photosynthesis", "chlorophyll", "stomata", "lamina"]
+
+    asks_meaning = any(
+        phrase in low
+        for phrase in [
+            "meaning of",
+            "what is",
+            "matlab",
+            "meaning bolo",
+            "hindi me meaning",
+            "bangla te meaning",
+            "tamil la meaning",
+            "telugu lo meaning",
+        ]
+    )
+    if not asks_meaning:
+        return None
+
+    for word in technical_words:
+        if word in low:
+            return word
+    return None
+
+
+# =========================================================
+# Memory / DB Helpers
+# =========================================================
 def save_live_session(state: Dict[str, Any]) -> None:
     if not supabase:
         return
@@ -599,6 +769,9 @@ def insert_parent_guidance_report(
         pass
 
 
+# =========================================================
+# Teacher / Student Context Helpers
+# =========================================================
 def pick_teacher_from_db(
     board: str,
     class_name: str,
@@ -630,104 +803,6 @@ def pick_teacher_from_db(
     except Exception:
         pass
     return default_teacher
-
-
-def append_history(state: Dict[str, Any], role: str, text: str) -> None:
-    state.setdefault("history", []).append({"role": role, "text": text})
-
-
-def detect_food_fact(text: str) -> Optional[str]:
-    low = text.lower()
-    for food, fact in FOOD_FACTS.items():
-        if food in low:
-            return fact
-    return None
-
-
-def guess_language_from_name(full_name: str) -> Optional[str]:
-    words = [w.strip(" .,!?").lower() for w in full_name.split() if w.strip()]
-    for word in reversed(words):
-        if word in REGIONAL_GUESS_MAP:
-            return REGIONAL_GUESS_MAP[word]
-    return None
-
-
-def detect_specific_language_name(text: str) -> Optional[str]:
-    low = text.lower()
-    language_map = {
-        "english": "English",
-        "hindi": "Hindi",
-        "hinglish": "Hinglish",
-        "bengali": "Bengali",
-        "bangla": "Bengali",
-        "tamil": "Tamil",
-        "telugu": "Telugu",
-        "marathi": "Marathi",
-        "gujarati": "Gujarati",
-        "malayalam": "Malayalam",
-        "kannada": "Kannada",
-        "punjabi": "Punjabi",
-        "odia": "Odia",
-        "assamese": "Assamese",
-    }
-    for key, value in language_map.items():
-        if key in low:
-            return value
-    return None
-
-
-def detect_special_language_request(text: str) -> Optional[str]:
-    low = text.lower().strip()
-    if "amra bangla te kotha bolte paari" in low or "bangla te kotha bolte pari" in low:
-        return "Bengali"
-    if "bangla te bolo" in low or "bangla bolo" in low:
-        return "Bengali"
-    if "hindi me bolo" in low or "hindi mein bolo" in low:
-        return "Hindi"
-    if "tamil la pesalama" in low or "tamil pesalama" in low:
-        return "Tamil"
-    if "telugu lo matladacha" in low or "telugu lo maatladacha" in low:
-        return "Telugu"
-    if "marathi madhe bolu" in low:
-        return "Marathi"
-    if "gujarati ma bolo" in low:
-        return "Gujarati"
-    return None
-
-
-def detect_preferred_teaching_mode(text: str) -> Optional[str]:
-    low = text.lower()
-    if "hinglish" in low:
-        return "Hinglish"
-    if "english" in low and "hindi" in low:
-        return "Hinglish"
-    if "full english" in low or "only english" in low:
-        return "English"
-    if "english" in low and not any(x in low for x in ["weak english", "poor english"]):
-        return "English"
-    if "hindi" in low:
-        return "Hindi"
-    if "bengali" in low or "bangla" in low:
-        return "Bengali"
-    if "tamil" in low:
-        return "Tamil"
-    if "telugu" in low:
-        return "Telugu"
-    if "marathi" in low:
-        return "Marathi"
-    if "gujarati" in low:
-        return "Gujarati"
-    if "malayalam" in low:
-        return "Malayalam"
-    if "kannada" in low:
-        return "Kannada"
-    if "punjabi" in low:
-        return "Punjabi"
-    if "odia" in low:
-        return "Odia"
-    if "assamese" in low:
-        return "Assamese"
-    return None
 
 
 def update_language_usage(state: Dict[str, Any], text: str) -> None:
@@ -792,67 +867,35 @@ def extract_interest_memory(student_text: str) -> Dict[str, Any]:
     return out
 
 
-def merge_student_memory(state: Dict[str, Any], patch: Dict[str, Any]) -> None:
-    if not patch:
-        return
-    memory = state.setdefault("student_memory", {})
-    for k, v in patch.items():
-        if v not in (None, "", [], {}):
-            memory[k] = v
-
-
 def teacher_personal_answer(state: Dict[str, Any], student_text: str) -> Optional[str]:
     low = student_text.lower()
     persona = state.get("teacher_persona", {})
     family = persona.get("family_profile", {})
     hobbies = persona.get("hobby_profile", {})
     foods = persona.get("food_profile", {})
+
     if "children" in low or "child" in low or "kids" in low:
         if family.get("has_children"):
             return f"Yes dear, I do. I have {family.get('children_description', 'one school-going child')}."
         return "No dear, I do not have children, but I care deeply for my students."
+
     if "favorite food" in low:
         favs = foods.get("favorite_foods", ["khichdi"])
         return f"I like simple comforting food. I especially enjoy {', '.join(favs[:2])}."
+
     if "hobby" in low:
         hobby_list = hobbies.get("hobbies", ["reading", "storytelling"])
         return f"In my free time I enjoy {', '.join(hobby_list[:2])}."
+
     return None
 
 
-def detect_low_english(text: str) -> bool:
-    low = text.lower().strip()
-    weak_patterns = [
-        "i goed",
-        "he go",
-        "she go",
-        "i am understanding",
-        "i no understand",
-        "i not know",
-        "me like",
-        "i not able",
-        "i no like",
-    ]
-    return any(p in low for p in weak_patterns)
-
-
-def maybe_gentle_language_model(state: Dict[str, Any], student_text: str) -> Optional[str]:
-    if not detect_low_english(student_text):
-        return None
-    state.setdefault("student_memory", {})["english_correction_level"] = "gentle_support"
-    state["student_memory"]["english_improvement_score"] = int(
-        state["student_memory"].get("english_improvement_score", 0)
-    ) + 1
-    return "Small English help for you: say it this way once more in a smoother sentence. Good try though, you are learning nicely."
-
-
-def preferred_explanation_style(state: Dict[str, Any]) -> str:
-    pref = state.get("preferred_teaching_mode") or state.get("student_memory", {}).get("preferred_language") or state.get("language")
-    return pretty_language(pref)
-
-
+# =========================================================
+# Teaching Meaning Helpers
+# =========================================================
 def explain_technical_word_meaning(word: str, language: str) -> Optional[str]:
     key = word.lower().strip()
+
     meanings = {
         "photosynthesis": {
             "Hindi": "photosynthesis ka matlab hai plant sunlight, water aur carbon dioxide use karke apna food banata hai.",
@@ -883,33 +926,22 @@ def explain_technical_word_meaning(word: str, language: str) -> Optional[str]:
             "English": "lamina is the broad flat part of a leaf.",
         },
     }
+
     if key in meanings:
         return meanings[key].get(language) or meanings[key].get("English")
     return None
 
 
-def detect_meaning_request(text: str) -> Optional[str]:
-    low = text.lower()
-    technical_words = ["photosynthesis", "chlorophyll", "stomata", "lamina"]
-    asks_meaning = any(
-        phrase in low
-        for phrase in [
-            "meaning of",
-            "what is",
-            "matlab",
-            "meaning bolo",
-            "hindi me meaning",
-            "bangla te meaning",
-            "tamil la meaning",
-            "telugu lo meaning",
-        ]
+# =========================================================
+# Response Helpers
+# =========================================================
+def preferred_explanation_style(state: Dict[str, Any]) -> str:
+    pref = (
+        state.get("preferred_teaching_mode")
+        or state.get("student_memory", {}).get("preferred_language")
+        or state.get("language")
     )
-    if not asks_meaning:
-        return None
-    for word in technical_words:
-        if word in low:
-            return word
-    return None
+    return pretty_language(pref)
 
 
 def mix_line_for_language(language: str, key: str) -> str:
@@ -917,45 +949,58 @@ def mix_line_for_language(language: str, key: str) -> str:
 
 
 def react_to_name(name: str) -> str:
-    return random.choice([
-        f"Very nice, {name}. That is a lovely name.",
-        f"Aha, {name}. Beautiful name.",
-        f"Nice to meet you properly, {name}.",
-    ])
+    return random.choice(
+        [
+            f"Very nice, {name}. That is a lovely name.",
+            f"Aha, {name}. Beautiful name.",
+            f"Nice to meet you properly, {name}.",
+        ]
+    )
 
 
 def build_reactive_intro_reply(state: Dict[str, Any], student_text: str) -> str:
     low = student_text.lower().strip()
+
     if detect_food_fact(student_text):
         food_fact = detect_food_fact(student_text)
         food_name = state.get("student_memory", {}).get("favorite_food")
         if food_name:
             return f"Ah, {food_name} - that is such a lovely choice. {food_fact}"
         return f"That sounds lovely. {food_fact}"
+
     if any(x in low for x in ["good", "fine", "happy", "great", "nice", "awesome"]):
-        return random.choice([
-            "That makes me happy too.",
-            "Lovely, that gives me a nice feeling.",
-            "Very nice, I like that energy.",
-        ])
+        return random.choice(
+            [
+                "That makes me happy too.",
+                "Lovely, that gives me a nice feeling.",
+                "Very nice, I like that energy.",
+            ]
+        )
+
     if any(x in low for x in ["tired", "sleepy", "not good", "sad", "upset"]):
-        return random.choice([
-            "That is okay dear, we will keep the class soft and easy.",
-            "No pressure at all, I will stay gentle with you.",
-        ])
-    return random.choice([
-        "I like the way you said that.",
-        "That gave me a clear picture.",
-        "Aha, now I understand you better.",
-        "That sounds very honest.",
-        "You are telling me nicely.",
-    ])
+        return random.choice(
+            [
+                "That is okay dear, we will keep the class soft and easy.",
+                "No pressure at all, I will stay gentle with you.",
+            ]
+        )
+
+    return random.choice(
+        [
+            "I like the way you said that.",
+            "That gave me a clear picture.",
+            "Aha, now I understand you better.",
+            "That sounds very honest.",
+            "You are telling me nicely.",
+        ]
+    )
 
 
 def build_intro_reaction_then_followup(state: Dict[str, Any], student_text: str) -> str:
     special_lang = detect_special_language_request(student_text)
+
     if special_lang == "Bengali":
-        return "Haan, amra oboshyoi Bangla te kotha bolte paari. Tumi jodi Bangla te comfortable feel koro, ami Bangla mix kore tomar sathe porbo."
+        return "Haan, amra oboshyoi Bangla te kotha bolte paari. Tumi jodi Bangla te comfortable feel koro, ami Bangla mix kore tomar sathe porabo."
     if special_lang == "Hindi":
         return "Bilkul, hum Hindi mein baat kar sakte hain. Agar tum Hindi mein zyada comfortable ho, main waise hi padhane ki koshish karungi."
     if special_lang == "Tamil":
@@ -966,6 +1011,7 @@ def build_intro_reaction_then_followup(state: Dict[str, Any], student_text: str)
         return "Yes dear, we can speak in Marathi too. If Marathi feels easier for you, I will keep the class comfortable that way."
     if special_lang == "Gujarati":
         return "Yes dear, we can speak in Gujarati too. If Gujarati feels easier for you, I will teach in a comfortable mixed way."
+
     return build_reactive_intro_reply(state, student_text)
 
 
@@ -993,6 +1039,7 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
     meta = meta or {}
     preferred_lang = preferred_explanation_style(state)
     meta["speech_text"] = speech_text(teacher_text, preferred_lang)
+
     return TurnResponse(
         ok=True,
         session_id=state["session_id"],
@@ -1018,11 +1065,15 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
             "quiz_total": int(state.get("quiz_total", 0)),
             "quiz_correct": int(state.get("quiz_correct", 0)),
             "percentage": int((int(state.get("quiz_correct", 0)) / max(1, int(state.get("quiz_total", 0)))) * 100)
-            if int(state.get("quiz_total", 0)) > 0 else 0,
+            if int(state.get("quiz_total", 0)) > 0
+            else 0,
         },
     )
 
 
+# =========================================================
+# Intro / Story / Teach Logic
+# =========================================================
 def intro_is_ready_to_transition(state: Dict[str, Any]) -> bool:
     intro = state.get("intro_profile", {})
     turns = int(intro.get("intro_turn_count", 0))
@@ -1166,7 +1217,6 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     if personal:
         return make_turn(state, personal, True, False)
 
-    # language-switch requests
     special_lang = detect_special_language_request(student_text)
     if special_lang:
         state["preferred_teaching_mode"] = special_lang
@@ -1177,46 +1227,11 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         followup = intro_followup_after_reaction(state, student_text)
         return make_turn(state, f"{reaction} {followup}".strip(), True, False)
 
-    # ---------- NAME CAPTURE: always respond ----------
-   parsed_name = extract_student_name(student_text)
+    parsed_name = extract_student_name(student_text)
+    if parsed_name:
+        state["student_name"] = parsed_name
+        state.setdefault("student_memory", {}).setdefault("known_facts", {})["student_name"] = parsed_name
 
-if parsed_name:
-    # always trust a clear name in intro
-    state["student_name"] = parsed_name
-    state.setdefault("student_memory", {}).setdefault("known_facts", {})["student_name"] = parsed_name
-
-    guessed = guess_language_from_name(parsed_name)
-    if guessed and not state.get("student_memory", {}).get("home_language"):
-        state.setdefault("student_memory", {})["home_language"] = guessed
-        intro["guessed_language"] = guessed
-
-    message_parts = [react_to_name(parsed_name)]
-
-    if not intro["mic_explained"]:
-        intro["mic_explained"] = True
-        message_parts.append(
-            "Now let me explain how this class will work. During our intro chat, your mic stays active. "
-            "If you speak, I will stop and listen. Once teaching starts, the mic becomes manual, and then "
-            "you need to press and hold the mic button below the screen in the center."
-        )
-
-    stored_pref = state.get("student_memory", {}).get("preferred_language")
-    if stored_pref:
-        message_parts.append(f"I already remember that {stored_pref} feels comfortable for you.")
-        message_parts.append(intro_followup_after_reaction(state, student_text))
-    else:
-        if guessed == "Bengali":
-            message_parts.append("By the way, your surname makes me feel Bangla may also be familiar to you.")
-        elif guessed == "Hindi":
-            message_parts.append("By the way, your surname makes me feel Hindi may also sound natural to you.")
-        elif guessed:
-            message_parts.append(f"Your surname also gives me a small feeling that {guessed} may sound familiar to you.")
-        message_parts.append(
-            "One more thing, which exact language feels easiest for you while learning: English, Hindi, Bangla, Tamil, Telugu, or another language?"
-        )
-
-    return make_turn(state, " ".join(message_parts).strip(), True, False)
-        # guess regional language from surname
         guessed = guess_language_from_name(parsed_name)
         if guessed and not state.get("student_memory", {}).get("home_language"):
             state.setdefault("student_memory", {})["home_language"] = guessed
@@ -1238,18 +1253,19 @@ if parsed_name:
             message_parts.append(intro_followup_after_reaction(state, student_text))
         else:
             if guessed == "Bengali":
-                message_parts.append("By the way, tomar surname shune mone hochhe tumi hoyto Bangla-o bhalo bujho.")
+                message_parts.append("By the way, your surname makes me feel Bangla may also be familiar to you.")
             elif guessed == "Hindi":
-                message_parts.append("By the way, tumhara surname sunke lag raha hai Hindi bhi tumhe natural lag sakti hai.")
+                message_parts.append("By the way, your surname makes me feel Hindi may also sound natural to you.")
             elif guessed:
-                message_parts.append(f"By the way, your surname gives me a little feeling that {guessed} may also sound familiar to you.")
+                message_parts.append(
+                    f"Your surname also gives me a small feeling that {guessed} may sound familiar to you."
+                )
             message_parts.append(
                 "One more thing, which exact language feels easiest for you while learning: English, Hindi, Bangla, Tamil, Telugu, or another language?"
             )
 
         return make_turn(state, " ".join(message_parts).strip(), True, False)
 
-    # explicit language answer
     specific_language = detect_specific_language_name(student_text)
     parsed_mode = detect_preferred_teaching_mode(student_text)
 
@@ -1328,6 +1344,7 @@ if parsed_name:
         upsert_student_brain_memory(state)
 
     return make_turn(state, intro_followup_after_reaction(state, student_text), True, False)
+
 
 def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) -> TurnResponse:
     meaning_word = detect_meaning_request(text)
@@ -1483,6 +1500,9 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
     return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", False, True)
 
 
+# =========================================================
+# Routes
+# =========================================================
 @app.get("/health")
 def health():
     return {
@@ -1627,8 +1647,10 @@ def respond(req: RespondRequest):
 
     if req.teacher_name and req.teacher_name.strip():
         state["teacher_name"] = sanitize_teacher_name(req.teacher_name.strip())
+
     if req.student_name and req.student_name.strip():
         state["student_name"] = title_case_name(req.student_name.strip())
+
     incoming_language = req.preferred_language or req.language
     if incoming_language and incoming_language.strip():
         state["language"] = pretty_language(incoming_language.strip())
@@ -1648,12 +1670,16 @@ def respond(req: RespondRequest):
 
     if state["phase"] == "INTRO":
         return answer_during_intro(state, text, req)
+
     if state["phase"] == "STORY":
         return answer_during_story_or_teach(state, text, mode="story")
+
     if state["phase"] == "TEACH":
         return answer_during_story_or_teach(state, text, mode="teach")
+
     if state["phase"] == "QUIZ":
         return answer_during_quiz(state, text)
+
     if state["phase"] == "HOMEWORK":
         return answer_during_homework(state, text)
 
