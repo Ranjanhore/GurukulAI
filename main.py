@@ -1178,11 +1178,44 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         return make_turn(state, f"{reaction} {followup}".strip(), True, False)
 
     # ---------- NAME CAPTURE: always respond ----------
-    parsed_name = extract_student_name(student_text)
-    if parsed_name and not state.get("student_name"):
-        state["student_name"] = parsed_name
-        state.setdefault("student_memory", {}).setdefault("known_facts", {})["student_name"] = parsed_name
+   parsed_name = extract_student_name(student_text)
 
+if parsed_name:
+    # always trust a clear name in intro
+    state["student_name"] = parsed_name
+    state.setdefault("student_memory", {}).setdefault("known_facts", {})["student_name"] = parsed_name
+
+    guessed = guess_language_from_name(parsed_name)
+    if guessed and not state.get("student_memory", {}).get("home_language"):
+        state.setdefault("student_memory", {})["home_language"] = guessed
+        intro["guessed_language"] = guessed
+
+    message_parts = [react_to_name(parsed_name)]
+
+    if not intro["mic_explained"]:
+        intro["mic_explained"] = True
+        message_parts.append(
+            "Now let me explain how this class will work. During our intro chat, your mic stays active. "
+            "If you speak, I will stop and listen. Once teaching starts, the mic becomes manual, and then "
+            "you need to press and hold the mic button below the screen in the center."
+        )
+
+    stored_pref = state.get("student_memory", {}).get("preferred_language")
+    if stored_pref:
+        message_parts.append(f"I already remember that {stored_pref} feels comfortable for you.")
+        message_parts.append(intro_followup_after_reaction(state, student_text))
+    else:
+        if guessed == "Bengali":
+            message_parts.append("By the way, your surname makes me feel Bangla may also be familiar to you.")
+        elif guessed == "Hindi":
+            message_parts.append("By the way, your surname makes me feel Hindi may also sound natural to you.")
+        elif guessed:
+            message_parts.append(f"Your surname also gives me a small feeling that {guessed} may sound familiar to you.")
+        message_parts.append(
+            "One more thing, which exact language feels easiest for you while learning: English, Hindi, Bangla, Tamil, Telugu, or another language?"
+        )
+
+    return make_turn(state, " ".join(message_parts).strip(), True, False)
         # guess regional language from surname
         guessed = guess_language_from_name(parsed_name)
         if guessed and not state.get("student_memory", {}).get("home_language"):
