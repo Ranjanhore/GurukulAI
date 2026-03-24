@@ -2,6 +2,8 @@ import os
 import json
 import uuid
 import random
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional, Any, Dict, List
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
@@ -11,7 +13,7 @@ from pydantic import BaseModel
 from supabase import create_client, Client
 from openai import OpenAI
 
-app = FastAPI(title="GurukulAI Backend", version="10.4")
+app = FastAPI(title="GurukulAI Backend", version="10.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,8 +82,8 @@ REGIONAL_GUESS_MAP = {
 }
 
 LANGUAGE_GREETING_SAMPLES = {
-    "Bengali": ["Ki khobor?", "Bhalo acho?"],
-    "Hindi": ["Kaise ho beta?", "Aaj ka din kaisa tha?"],
+    "Bengali": ["Ki khobor?", "Bhalo acho?", "Darun!"],
+    "Hindi": ["Kaise ho beta?", "Sab theek?", "Bahut badhiya."],
     "Tamil": ["Eppadi irukka?"],
     "Telugu": ["Ela unnava?"],
     "Marathi": ["Kasa ahes?"],
@@ -93,6 +95,34 @@ LANGUAGE_GREETING_SAMPLES = {
     "Assamese": ["Kene aso?"],
 }
 
+LANGUAGE_MIX_LINES = {
+    "Bengali": {
+        "ack": "Darun, tumi Bangla te comfortable. Tahole ami Bangla mix kore porabo.",
+        "joke": "Bangla te pora hole class ta ekdom nijer moto lage, tai na?",
+        "start": "Ebar cholo aajker chapter-e dhuki.",
+    },
+    "Hindi": {
+        "ack": "Bahut badhiya, tum Hindi mein comfortable ho. Main Hindi mix karke samjhaungi.",
+        "joke": "Hindi mix ho to class thodi aur apni si lagti hai, hai na?",
+        "start": "Chalo ab aaj ke chapter mein dhyan se chalte hain.",
+    },
+    "English": {
+        "ack": "Very nice, I can see English feels comfortable for you.",
+        "joke": "That means we can enjoy the class with a little smooth English flow.",
+        "start": "Now let us get into today’s chapter.",
+    },
+    "Tamil": {
+        "ack": "Super, Tamil comfortable-na naan konjam Tamil mix panni solluven.",
+        "joke": "Appo class konjam innum friendly-aa irukkum.",
+        "start": "Sari, ippo innaiku chapter-ku povom.",
+    },
+    "Telugu": {
+        "ack": "Chaala bagundi, Telugu comfortable ante Telugu mix chestanu.",
+        "joke": "Appudu class inka easy ga untundi.",
+        "start": "Sare, ippudu eeroju chapter loki veldaam.",
+    },
+}
+
 FOOD_FACTS = {
     "banana": "Banana gives quick energy and potassium.",
     "rice": "Rice gives the body energy through carbohydrates.",
@@ -101,7 +131,7 @@ FOOD_FACTS = {
     "milk": "Milk supports strong bones and teeth.",
     "curd": "Curd is often soothing for the stomach.",
     "apple": "Apple gives fiber and supports daily health.",
-    "mango": "Mango gives vitamins and bright energy.",
+    "mango": "Mango gives vitamins and bright energy, and many children love its sweet taste.",
     "roti": "Roti gives steady energy.",
     "fish": "Fish can be rich in protein and healthy fats.",
     "chicken": "Chicken is a protein-rich food.",
@@ -112,26 +142,17 @@ FOOD_FACTS = {
     "khichdi": "Khichdi is warm, soft, and comforting.",
 }
 
-PHRASE_FAMILY_VARIANTS = {
-    "warm_ack": [
-        "I like the way you said that.",
-        "That gave me a clear picture.",
-        "Aha, now I understand you better.",
-        "That sounds very honest.",
-        "You’re telling me nicely.",
-    ],
-    "comfort": [
-        "Good, we are settling in nicely.",
-        "Now this is starting to feel easy.",
-        "I think we are understanding each other better now.",
-        "This is becoming a comfortable conversation now.",
-    ],
-    "gentle_fun": [
-        "A kitchen without food is a very sad place.",
-        "Leaves work so quietly, no complaints and no holidays.",
-        "Questions are good. They keep the class alive.",
-    ],
-}
+SCIENCE_KEYWORDS = [
+    "leaf", "lamina", "chlorophyll", "photosynthesis", "stomata", "venation",
+    "reticulate", "parallel", "petiole", "transpiration", "respiration",
+]
+
+INTEREST_KEYWORDS = [
+    "mango", "banana", "apple", "cricket", "football", "badminton", "basketball",
+    "minecraft", "free fire", "roblox", "chess", "carrom", "ludo", "story",
+    "kitchen", "mother", "father", "grandmother", "bangla", "bengali", "hindi",
+    "english", "tamil", "telugu",
+]
 
 PRONUNCIATION_MAP = {
     "Teacher Asha Sharma": "Teacher Asha Shar-maa",
@@ -151,17 +172,6 @@ PRONUNCIATION_MAP = {
     "parallel": "pa-ruh-lel",
     "carbon dioxide": "car-bun dye-oxide",
 }
-
-INTRO_TOPIC_POOL = [
-    "name",
-    "language_pref",
-    "mood",
-    "favorite_food",
-    "games",
-    "sports",
-    "home_language",
-    "family_cooking",
-]
 
 class SessionStartRequest(BaseModel):
     board: str
@@ -210,6 +220,8 @@ def title_case_name(name: str) -> str:
 def pretty_language(value: Optional[str]) -> str:
     raw = (value or "Hinglish").strip()
     low = raw.lower()
+    if "english" in low and "hindi" in low:
+        return "Hinglish"
     mapping = {
         "hinglish": "Hinglish",
         "english": "English",
@@ -226,8 +238,6 @@ def pretty_language(value: Optional[str]) -> str:
         "odia": "Odia",
         "assamese": "Assamese",
     }
-    if "english" in low and "hindi" in low:
-        return "Hinglish"
     return mapping.get(low, raw or "Hinglish")
 
 def sanitize_teacher_name(name: Optional[str]) -> str:
@@ -242,6 +252,14 @@ def sanitize_teacher_name(name: Optional[str]) -> str:
     if raw.lower().startswith("teacher "):
         return raw
     return f"Teacher {raw}"
+
+def current_greeting() -> str:
+    hour = datetime.now(ZoneInfo("Asia/Kolkata")).hour
+    if hour < 12:
+        return "Good morning"
+    if hour < 17:
+        return "Good afternoon"
+    return "Good evening"
 
 def first_or_none(rows):
     return rows[0] if rows else None
@@ -548,6 +566,24 @@ def detect_specific_language_name(text: str) -> Optional[str]:
             return value
     return None
 
+def detect_special_language_request(text: str) -> Optional[str]:
+    low = text.lower().strip()
+    if "amra bangla te kotha bolte paari" in low or "bangla te kotha bolte pari" in low:
+        return "Bengali"
+    if "bangla te bolo" in low or "bangla bolo" in low:
+        return "Bengali"
+    if "hindi me bolo" in low or "hindi mein bolo" in low:
+        return "Hindi"
+    if "tamil la pesalama" in low or "tamil pesalama" in low:
+        return "Tamil"
+    if "telugu lo matladacha" in low or "telugu lo maatladacha" in low:
+        return "Telugu"
+    if "marathi madhe bolu" in low:
+        return "Marathi"
+    if "gujarati ma bolo" in low:
+        return "Gujarati"
+    return None
+
 def detect_preferred_teaching_mode(text: str) -> Optional[str]:
     low = text.lower()
     if "hinglish" in low:
@@ -580,34 +616,71 @@ def detect_preferred_teaching_mode(text: str) -> Optional[str]:
         return "Odia"
     if "assamese" in low:
         return "Assamese"
-
-    words = len(low.split())
-    english_chars = sum(1 for c in low if "a" <= c <= "z")
-    if words >= 8 and english_chars > 20:
-        return "English"
     return None
 
 def choose_phrase_variant(state: Dict[str, Any], family: str) -> str:
-    variants = PHRASE_FAMILY_VARIANTS.get(family, [])
-    if not variants:
+    variants = {
+        "warm_ack": [
+            "I like the way you said that.",
+            "That gave me a clear picture.",
+            "Aha, now I understand you better.",
+            "That sounds very honest.",
+            "You’re telling me nicely.",
+        ],
+        "comfort": [
+            "Good, we are settling in nicely.",
+            "Now this is starting to feel easy.",
+            "I think we are understanding each other better now.",
+            "This is becoming a comfortable conversation now.",
+        ],
+        "gentle_fun": [
+            "Questions are good. They keep the class alive.",
+            "A class becomes fun when both teacher and student talk naturally.",
+            "A little smile makes learning easier.",
+        ],
+    }
+    family_variants = variants.get(family, [])
+    if not family_variants:
         return ""
     memory = state.setdefault("intro_memory", {})
     recent_lines = memory.setdefault("recent_teacher_lines", [])
-    options = [v for v in variants if v not in recent_lines[-6:]]
-    chosen = random.choice(options or variants)
+    options = [v for v in family_variants if v not in recent_lines[-6:]]
+    chosen = random.choice(options or family_variants)
     recent_lines.append(chosen)
     memory["recent_teacher_lines"] = recent_lines[-12:]
     return chosen
 
+def react_to_name(name: str) -> str:
+    return random.choice([
+        f"Very nice, {name}. That is a lovely name.",
+        f"Aha, {name}. Beautiful name.",
+        f"Nice to meet you properly, {name}.",
+    ])
+
 def build_reactive_intro_reply(state: Dict[str, Any], student_text: str) -> str:
-    low = (student_text or "").lower().strip()
+    low = student_text.lower().strip()
+
     if detect_food_fact(student_text):
-        return f"{random.choice(['That sounds nice.', 'That sounds lovely.', 'Aha, that sounds comforting.'])} {detect_food_fact(student_text)}"
-    if any(x in low for x in ["tired", "sleepy", "exhausted"]):
-        return random.choice(["That’s okay, we’ll keep it gentle.", "No problem, then I’ll make this easy for you."])
+        food_fact = detect_food_fact(student_text)
+        food_name = state.get("student_memory", {}).get("favorite_food")
+        if food_name:
+            return f"Ah, {food_name} — that is such a lovely choice. {food_fact}"
+        return f"That sounds lovely. {food_fact}"
+
     if any(x in low for x in ["good", "fine", "happy", "great", "nice", "awesome"]):
-        return random.choice(["That’s nice to hear.", "Lovely.", "Good, that gives me a nice feeling."])
-    return choose_phrase_variant(state, "warm_ack") or "I like the way you’re talking."
+        return random.choice([
+            "That makes me happy too.",
+            "Lovely, that gives me a nice feeling.",
+            "Very nice, I like that energy.",
+        ])
+
+    if any(x in low for x in ["tired", "sleepy", "not good", "sad", "upset"]):
+        return random.choice([
+            "That is okay dear, we will keep the class soft and easy.",
+            "No pressure at all, I will stay gentle with you.",
+        ])
+
+    return choose_phrase_variant(state, "warm_ack") or "I like the way you said that."
 
 def adjust_student_signals(state: Dict[str, Any], text: str) -> None:
     low = text.lower()
@@ -629,24 +702,67 @@ def mark_topic_asked(state: Dict[str, Any], topic: str) -> None:
     if topic and topic not in asked:
         asked.append(topic)
 
+def update_language_usage(state: Dict[str, Any], text: str) -> None:
+    memory = state.setdefault("student_memory", {})
+    usage = memory.setdefault("language_usage", {})
+    detected = detect_specific_language_name(text) or detect_special_language_request(text)
+
+    if detected:
+        usage[detected] = int(usage.get(detected, 0)) + 3
+    elif any("\u0980" <= ch <= "\u09FF" for ch in text):
+        usage["Bengali"] = int(usage.get("Bengali", 0)) + 2
+    elif "hindi" in text.lower():
+        usage["Hindi"] = int(usage.get("Hindi", 0)) + 1
+    else:
+        usage["English"] = int(usage.get("English", 0)) + 1
+
+    strongest = None
+    strongest_score = -1
+    for lang, score in usage.items():
+        if score > strongest_score:
+            strongest = lang
+            strongest_score = score
+
+    if strongest:
+        memory["strongest_language"] = strongest
+        if not memory.get("preferred_language"):
+            memory["preferred_language"] = strongest
+
+def record_keywords(state: Dict[str, Any], text: str) -> None:
+    low = text.lower()
+    memory = state.setdefault("student_memory", {})
+    known = memory.setdefault("known_facts", {})
+    keywords = set(known.get("keywords", []))
+
+    for key in INTEREST_KEYWORDS + SCIENCE_KEYWORDS:
+        if key in low:
+            keywords.add(key)
+
+    known["keywords"] = sorted(list(keywords))
+
 def extract_interest_memory(student_text: str) -> Dict[str, Any]:
     low = student_text.lower()
     out: Dict[str, Any] = {}
+
     for food in FOOD_FACTS.keys():
         if food in low:
             out["favorite_food"] = food
             break
+
     for sport in ["cricket", "football", "badminton", "basketball", "tennis"]:
         if sport in low:
             out["favorite_sport"] = sport
             break
+
     for game in ["minecraft", "free fire", "roblox", "chess", "carrom", "ludo", "video game"]:
         if game in low:
             out["favorite_game"] = game
             break
+
     lang = detect_preferred_teaching_mode(student_text)
     if lang:
         out["preferred_language"] = lang
+
     return out
 
 def merge_student_memory(state: Dict[str, Any], patch: Dict[str, Any]) -> None:
@@ -656,13 +772,6 @@ def merge_student_memory(state: Dict[str, Any], patch: Dict[str, Any]) -> None:
     for k, v in patch.items():
         if v not in (None, "", [], {}):
             memory[k] = v
-
-def choose_next_intro_topic(state: Dict[str, Any]) -> Optional[str]:
-    memory = state.setdefault("intro_memory", {})
-    asked = set(memory.get("asked_topics", []))
-    closed = set(memory.get("closed_topics", []))
-    candidates = [x for x in INTRO_TOPIC_POOL if x not in asked and x not in closed]
-    return random.choice(candidates) if candidates else None
 
 def teacher_personal_answer(state: Dict[str, Any], student_text: str) -> Optional[str]:
     low = student_text.lower()
@@ -685,8 +794,8 @@ def teacher_personal_answer(state: Dict[str, Any], student_text: str) -> Optiona
 def detect_low_english(text: str) -> bool:
     low = text.lower().strip()
     weak_patterns = [
-        "i goed", "he go", "she go", "i am understanding", "i no understand", "i not know",
-        "me like", "i not able", "i no like",
+        "i goed", "he go", "she go", "i am understanding", "i no understand",
+        "i not know", "me like", "i not able", "i no like",
     ]
     return any(p in low for p in weak_patterns)
 
@@ -701,37 +810,45 @@ def preferred_explanation_style(state: Dict[str, Any]) -> str:
     pref = state.get("preferred_teaching_mode") or state.get("student_memory", {}).get("preferred_language") or state.get("language")
     return pretty_language(pref)
 
-def intro_followup_after_reaction(state: Dict[str, Any], student_text: str) -> str:
-    next_topic = choose_next_intro_topic(state)
-    guessed = state.get("intro_profile", {}).get("guessed_language")
+def mix_line_for_language(language: str, key: str) -> str:
+    return LANGUAGE_MIX_LINES.get(language, LANGUAGE_MIX_LINES.get("English", {})).get(key, "")
 
-    if next_topic == "language_pref":
-        mark_topic_asked(state, "language_pref")
-        return "Tell me one thing — which exact language feels easiest for you when learning: English, Hindi, Bengali, Tamil, Telugu, or another language you use at home?"
+def build_intro_reaction_then_followup(state: Dict[str, Any], student_text: str) -> str:
+    special_lang = detect_special_language_request(student_text)
+    if special_lang == "Bengali":
+        return "Haan, amra oboshyoi Bangla te kotha bolte paari. Tumi jodi Bangla te comfortable feel koro, ami Bangla mix kore tomar sathe porbo."
+    if special_lang == "Hindi":
+        return "Bilkul, hum Hindi mein baat kar sakte hain. Agar tum Hindi mein zyada comfortable ho, main waise hi padhane ki koshish karungi."
+    if special_lang == "Tamil":
+        return "Yes dear, we can speak in Tamil too. If Tamil feels easier for you, I will keep the class comfortable that way."
+    if special_lang == "Telugu":
+        return "Yes dear, we can speak in Telugu too. If Telugu feels easier for you, I will teach in a more comfortable mixed way."
+    if special_lang == "Marathi":
+        return "Yes dear, we can speak in Marathi too. If Marathi feels easier for you, I will keep the class comfortable that way."
+    if special_lang == "Gujarati":
+        return "Yes dear, we can speak in Gujarati too. If Gujarati feels easier for you, I will teach in a comfortable mixed way."
+
+    return build_reactive_intro_reply(state, student_text)
+
+def intro_followup_after_reaction(state: Dict[str, Any], student_text: str) -> str:
+    memory = state.setdefault("intro_memory", {})
+    next_order = memory.setdefault("intro_flow", ["favorite_food", "sports", "family_cooking"])
+    pref = preferred_explanation_style(state)
+
+    if next_order:
+        next_topic = next_order.pop(0)
+    else:
+        next_topic = random.choice(["favorite_food", "games", "sports", "family_cooking"])
 
     if next_topic == "favorite_food":
-        mark_topic_asked(state, "favorite_food")
-        return "Tell me one thing, what food makes you happiest when it comes in front of you?"
-
+        return "By the way, what food makes you happiest when it comes in front of you?"
     if next_topic == "games":
-        mark_topic_asked(state, "games")
-        return "Do you enjoy games more, or stories more?"
-
+        return "Tell me, do you enjoy games more, or stories more?"
     if next_topic == "sports":
-        mark_topic_asked(state, "sports")
-        return "Do you like to play any sport, like cricket, football, or badminton?"
-
-    if next_topic == "home_language":
-        mark_topic_asked(state, "home_language")
-        if guessed and guessed in LANGUAGE_GREETING_SAMPLES:
-            return f"{random.choice(LANGUAGE_GREETING_SAMPLES[guessed])} At home, which exact language do you speak most?"
-        return "At home, which exact language do you speak most?"
-
+        return "Nice. Tell me, which sport do you like the most?"
     if next_topic == "family_cooking":
-        mark_topic_asked(state, "family_cooking")
-        return "Tell me, who usually makes food in your house?"
-
-    return choose_phrase_variant(state, "comfort") or "Good, we are settling in nicely."
+        return "One more thing — who usually makes food in your house?"
+    return mix_line_for_language(pref, "joke") or choose_phrase_variant(state, "comfort") or "Good, we are settling in nicely."
 
 def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, done: bool, meta: Optional[Dict[str, Any]] = None) -> TurnResponse:
     append_history(state, "teacher", teacher_text)
@@ -770,40 +887,47 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
 def intro_is_ready_to_transition(state: Dict[str, Any]) -> bool:
     intro = state.get("intro_profile", {})
     turns = int(intro.get("intro_turn_count", 0))
-    return turns >= 10 or intro.get("ready_to_start") is True
+    has_name = bool(state.get("student_name"))
+    has_lang = bool(state.get("preferred_teaching_mode"))
+    return (turns >= 8 and has_name and has_lang) or intro.get("ready_to_start") is True
 
 def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject: str) -> List[str]:
     student_memory = state.get("student_memory", {}) or {}
+    favorite_food = student_memory.get("favorite_food") or "mango"
+    favorite_sport = student_memory.get("favorite_sport") or "a game"
     family_context = student_memory.get("family_context", {}) or {}
     cook_person = family_context.get("who_cooks") or "someone at home"
-    kitchen_name = family_context.get("food_place") or "kitchen"
-    favorite_food = student_memory.get("favorite_food") or "food"
-    return [
-        f"You told me that {cook_person} usually makes food at home.",
-        f"And that happens in the {kitchen_name}, right? So think of the {kitchen_name} as the food-making place of the house.",
-        f"Now imagine one afternoon a child comes home thinking about {favorite_food}.",
-        "While waiting for food, that child looks outside and notices green leaves shining quietly in the sunlight.",
-        "Then a gentle thought comes: every home has a place where food is made, so does a plant also have some special food-making part?",
-        f"So today, in {subject}, we are going to understand how this quiet green part of the plant helps in preparing food. That is where our chapter {chapter} begins.",
+    pref = preferred_explanation_style(state)
+
+    if favorite_food in ["mango", "apple", "banana"]:
+        place = "fruit basket or dining table"
+    else:
+        place = "kitchen"
+
+    lines = [
+        f"Before we start the chapter, let me tell you a little story connected to real life.",
+        f"Suppose one day after school you come home feeling hungry and you notice a {favorite_food} kept on the {place}.",
+        f"At the same time your mind is also on {favorite_sport}, so your stomach and your thoughts are both active together.",
+        f"You look around the house and think, food is ready for us because someone like {cook_person} takes care of it with love.",
+        f"Then you look outside and notice the green leaves shining in sunlight, and a question comes to your mind — if our home gives us food, how does a plant make its own food?",
+        f"That is where the leaf becomes very interesting. Bahar se simple lagta hai, but inside it is doing something amazing.",
+        f"So this chapter is not just about a leaf. It is about how a plant quietly prepares its own food and supports life.",
     ]
 
+    if pref == "Bengali":
+        lines.insert(1, "Ektu bhabo toh, ei chhoto jinishtar modhyeo koto boro golpo lukiye thakte pare.")
+    elif pref == "Hindi":
+        lines.insert(1, "Zara socho, kitni simple si cheez ke andar kitni badi kahani chhupi ho sakti hai.")
+
+    return lines
+
 def generate_lesson_content(board: str, class_name: str, subject: str, chapter: str, teacher_name: str) -> Dict[str, Any]:
+    greeting = current_greeting()
     return {
         "intro_chunks": [
-            random.choice([
-                f"Hello my dear, I am {teacher_name}. I’ll be with you through this class in a warm and friendly way.",
-                f"Hi sweetheart, I’m {teacher_name}. We’ll make this class warm and easy together.",
-                f"Hello dear, I’m {teacher_name}. Let us make this class feel easy and natural together.",
-            ]),
-            "Before we begin, one important thing. Right now during our intro conversation, your mic is always active. If you speak, I will stop and listen to you immediately. Later, when I start teaching, the mic will become manual, and then you will need to press and hold the mic button to speak with me. The mic button is just below this screen in the center.",
-            "Now first tell me your full name once nicely.",
+            f"{greeting}! I am {teacher_name}. First tell me your full name once nicely.",
         ],
-        "story_chunks": [
-            "Let me tell you a small story first.",
-            "Think of a home where food is made in one special place.",
-            "Plants also have something like that.",
-            f"So before we study the chapter {chapter}, think of the leaf like the plant’s own quiet kitchen.",
-        ],
+        "story_chunks": [],
         "teach_chunks": [
             "A typical leaf has three main visible parts: leaf base, petiole, and lamina. The lamina is the broad flat green part.",
             "Inside the leaf there are veins and veinlets. These help in transport of water, minerals, and prepared food.",
@@ -859,9 +983,10 @@ You are GurukulAI Teacher in guided teaching mode.
 
 Rules:
 - Stay grounded in the current chunk.
-- If student is weak in English, explain in mixed English + Hindi or English + regional support.
-- If student says incorrect English, gently give the correct sentence once, then continue kindly.
-- Keep answers concise and supportive.
+- Default to mixed language if preferred_teaching_mode is not English.
+- If student is weak in English, explain in mixed English + Hindi or regional support.
+- If student says incorrect English, gently correct once, then continue kindly.
+- Keep answers concise, warm, and personal.
 - If the question is irrelevant, redirect gently.
 
 Return only JSON:
@@ -879,11 +1004,39 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         "intro_turn_count": 0,
         "ready_to_start": False,
         "guessed_language": None,
+        "mic_explained": False,
+        "story_teased": False,
     })
     intro["intro_turn_count"] += 1
 
+    update_language_usage(state, student_text)
+    record_keywords(state, student_text)
+
     if req.student_name and req.student_name.strip():
         state["student_name"] = title_case_name(req.student_name.strip())
+
+    personal = teacher_personal_answer(state, student_text)
+    if personal:
+        return make_turn(state, personal, True, False)
+
+    special_lang = detect_special_language_request(student_text)
+    if special_lang:
+        state["preferred_teaching_mode"] = special_lang
+        state.setdefault("student_memory", {})["preferred_language"] = special_lang
+        state["student_memory"]["strongest_language"] = special_lang
+        close_topic(state, "language_pref")
+        close_topic(state, "home_language")
+
+        reaction = build_intro_reaction_then_followup(state, student_text)
+        if not intro["story_teased"]:
+            intro["story_teased"] = True
+            return make_turn(
+                state,
+                f"{reaction} {mix_line_for_language(special_lang, 'joke') or ''}".strip(),
+                True,
+                False,
+            )
+        return make_turn(state, reaction, True, False)
 
     parsed_name = extract_student_name(student_text)
     if not state.get("student_name") and parsed_name:
@@ -894,23 +1047,12 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             "student_name": parsed_name,
         }
 
-        reaction = random.choice([
-            f"Very nice, {parsed_name}. That is a lovely name.",
-            f"Aha, {parsed_name}. Beautiful name.",
-            f"Nice to meet you properly, {parsed_name}.",
-        ])
-
-        if not state.get("preferred_teaching_mode"):
-            mark_topic_asked(state, "language_pref")
-            close_topic(state, "language_pref")
-            return make_turn(
-                state,
-                f"{reaction} Tell me one thing — which exact language feels easiest for you when learning: English, Hindi, Bengali, Tamil, Telugu, or another language you use at home?",
-                True,
-                False,
-            )
-
-        return make_turn(state, reaction, True, False)
+        msg = react_to_name(parsed_name)
+        if not intro["mic_explained"]:
+            intro["mic_explained"] = True
+            msg += " Now let me explain how this class will work. During our intro chat, your mic stays active. If you speak, I will stop and listen. Once teaching starts, the mic becomes manual, and then you need to press and hold the mic button below the screen in the center."
+        msg += " One more thing — which exact language feels easiest for you while learning: English, Hindi, Bangla, Tamil, Telugu, or another language?"
+        return make_turn(state, msg, True, False)
 
     specific_language = detect_specific_language_name(student_text)
     parsed_mode = detect_preferred_teaching_mode(student_text)
@@ -922,45 +1064,21 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         close_topic(state, "language_pref")
         close_topic(state, "home_language")
 
-        reaction = random.choice([
-            f"Very good. I got it — {specific_language} feels easiest for you.",
-            f"Perfect. I understand that {specific_language} is more comfortable for you.",
-            f"Lovely. I’ll keep {specific_language} in mind while teaching you.",
-        ])
-
-        if intro_is_ready_to_transition(state):
-            state["phase"] = "STORY"
-            state["story_chunks"] = build_story_from_student_memory(
-                state,
-                state.get("chapter", ""),
-                state.get("subject", ""),
-            )
-            return make_turn(state, reaction, False, False, {"resume_phase": "STORY"})
-
-        return make_turn(state, reaction, True, False)
+        reaction = mix_line_for_language(specific_language, "ack") or f"Very good. I got it — {specific_language} feels easiest for you."
+        joke = mix_line_for_language(specific_language, "joke")
+        return make_turn(state, f"{reaction} {joke}".strip(), True, False)
 
     if parsed_mode and not state.get("preferred_teaching_mode"):
         state["preferred_teaching_mode"] = parsed_mode
         state.setdefault("student_memory", {})["preferred_language"] = parsed_mode
         state["student_memory"]["strongest_language"] = parsed_mode
         close_topic(state, "language_pref")
-
-        reaction = random.choice([
-            f"Very good. I understood that {parsed_mode} feels comfortable for you.",
-            f"Perfect. I’ll teach you in a way that feels easy in {parsed_mode}.",
-            f"Nice. I’ll keep the class comfortable in {parsed_mode}.",
-        ])
-
-        if intro_is_ready_to_transition(state):
-            state["phase"] = "STORY"
-            state["story_chunks"] = build_story_from_student_memory(
-                state,
-                state.get("chapter", ""),
-                state.get("subject", ""),
-            )
-            return make_turn(state, reaction, False, False, {"resume_phase": "STORY"})
-
-        return make_turn(state, reaction, True, False)
+        return make_turn(
+            state,
+            f"{mix_line_for_language(parsed_mode, 'ack') or f'Perfect. I will keep {parsed_mode} in mind while teaching you.'}",
+            True,
+            False,
+        )
 
     merge_student_memory(state, extract_interest_memory(student_text))
 
@@ -971,8 +1089,6 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your father"
     if "grandmother" in low or "grandma" in low:
         state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your grandmother"
-    if "kitchen" in low:
-        state.setdefault("student_memory", {}).setdefault("family_context", {})["food_place"] = "kitchen"
 
     if state.get("student_name") and not intro.get("guessed_language"):
         guessed = guess_language_from_name(state["student_name"])
@@ -980,40 +1096,50 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             intro["guessed_language"] = guessed
             state.setdefault("student_memory", {})["home_language"] = guessed
 
-    personal = teacher_personal_answer(state, student_text)
-    if personal:
-        return make_turn(state, personal, True, False)
-
-    reaction = build_reactive_intro_reply(state, student_text)
-
-    if not state.get("student_name"):
-        return make_turn(state, f"{reaction} Now tell me your full name once nicely.", True, False)
-
-    if not state.get("preferred_teaching_mode"):
+    # react first if food or emotion is shared
+    if state.get("student_memory", {}).get("favorite_food") and "favorite_food_reacted" not in state.setdefault("intro_memory", {}):
+        state["intro_memory"]["favorite_food_reacted"] = True
+        food = state["student_memory"]["favorite_food"]
+        fact = FOOD_FACTS.get(food, "")
         return make_turn(
             state,
-            f"{reaction} Tell me one thing — which exact language feels easiest for you when learning: English, Hindi, Bengali, Tamil, Telugu, or another language you use at home?",
+            f"Ah, {food} — that is such a lovely choice. {fact} By the way, which sport do you like the most?",
             True,
             False,
         )
 
-    if intro["intro_turn_count"] % 3 == 0:
-        upsert_student_brain_memory(state)
+    if not state.get("student_name"):
+        return make_turn(state, "Tell me your full name once nicely.", True, False)
+
+    if not state.get("preferred_teaching_mode"):
+        return make_turn(
+            state,
+            "Tell me one thing — which exact language feels easiest for you while learning: English, Hindi, Bangla, Tamil, Telugu, or another language?",
+            True,
+            False,
+        )
+
+    # mini pre-story bonding
+    if intro["intro_turn_count"] < 6:
+        return make_turn(state, intro_followup_after_reaction(state, student_text), True, False)
 
     if intro_is_ready_to_transition(state):
+        pref = preferred_explanation_style(state)
         state["phase"] = "STORY"
         state["story_chunks"] = build_story_from_student_memory(
             state,
             state.get("chapter", ""),
             state.get("subject", ""),
         )
-        return make_turn(
-            state,
-            choose_phrase_variant(state, "comfort") or "Good, let us begin gently.",
-            False,
-            False,
-            {"resume_phase": "STORY"},
+        preface = (
+            f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
+            f"Listen carefully and concentrate. When I ask something, you should try to answer for a better score. "
+            f"If you do not understand anything, ask me without hesitation. By the end of the class, you should understand the whole chapter."
         )
+        return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
+
+    if intro["intro_turn_count"] % 3 == 0:
+        upsert_student_brain_memory(state)
 
     return make_turn(state, intro_followup_after_reaction(state, student_text), True, False)
 
@@ -1043,6 +1169,8 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
     if "photosynthesis" in text.lower():
         if pref == "English":
             msg = "Photosynthesis is the process by which plants make their own food using sunlight, water, and carbon dioxide."
+        elif pref == "Bengali":
+            msg = "Photosynthesis mane gachh surjer alo, jol, aar carbon dioxide use kore nijer khabar toiri kore. Simple bhabe bolo, gachh nijer khabar nijeyi banay."
         else:
             msg = "Photosynthesis means plants make their own food using sunlight, water, and carbon dioxide. Simple language mein, plant apna khana khud banata hai."
         return make_turn(state, msg, False, False)
@@ -1100,17 +1228,23 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
         chunks = state.get("intro_chunks", [])
         if idx < len(chunks):
             state["intro_index"] = idx + 1
-            if idx == 1:
-                close_topic(state, "mic_instruction")
-            awaiting = idx >= 2
+            awaiting = True
             return make_turn(state, chunks[idx], awaiting, False, {"intro_index": idx})
-        return make_turn(state, "Now tell me your full name once nicely.", True, False, {"intro_index": idx})
+        return make_turn(state, "Tell me your full name once nicely.", True, False, {"intro_index": idx})
 
     if phase == "STORY":
         idx = int(state.get("story_index", 0))
         chunks = state.get("story_chunks", [])
         if idx < len(chunks):
             state["story_index"] = idx + 1
+            if idx == len(chunks) - 1:
+                return make_turn(
+                    state,
+                    chunks[idx] + " Before I begin the actual teaching, tell me — does this little story make sense to you so far?",
+                    True,
+                    False,
+                    {"story_index": idx},
+                )
             return make_turn(state, chunks[idx], False, False, {"story_index": idx})
         state["phase"] = "TEACH"
         return serve_next_auto_turn(state)
@@ -1180,6 +1314,8 @@ def start_session(req: SessionStartRequest):
     session_id = str(uuid.uuid4())
     existing_student_memory = load_student_brain_memory(student_name, board, class_name) if student_name else {}
 
+    stored_pref = existing_student_memory.get("preferred_language") or language
+
     state: Dict[str, Any] = {
         "session_id": session_id,
         "teacher_id": teacher.get("id"),
@@ -1194,10 +1330,10 @@ def start_session(req: SessionStartRequest):
         "part_no": int(req.part_no or 1),
         "student_name": student_name,
         "language": language,
-        "preferred_teaching_mode": None,
+        "preferred_teaching_mode": existing_student_memory.get("preferred_language"),
         "student_memory": {
-            "preferred_language": existing_student_memory.get("preferred_language") or language,
-            "strongest_language": existing_student_memory.get("strongest_language"),
+            "preferred_language": stored_pref,
+            "strongest_language": existing_student_memory.get("strongest_language") or stored_pref,
             "home_language": existing_student_memory.get("home_language"),
             "favorite_food": existing_student_memory.get("favorite_food"),
             "favorite_game": existing_student_memory.get("favorite_game"),
@@ -1213,10 +1349,22 @@ def start_session(req: SessionStartRequest):
             "participation_score": existing_student_memory.get("participation_score", 0),
             "family_context": existing_student_memory.get("family_context", {}),
             "known_facts": existing_student_memory.get("known_facts", {}),
+            "language_usage": existing_student_memory.get("language_usage", {}),
         },
         "phase": "INTRO",
-        "intro_profile": {"intro_turn_count": 0, "ready_to_start": False, "guessed_language": None},
-        "intro_memory": {"asked_topics": [], "closed_topics": [], "recent_teacher_lines": []},
+        "intro_profile": {
+            "intro_turn_count": 0,
+            "ready_to_start": False,
+            "guessed_language": None,
+            "mic_explained": False,
+            "story_teased": False,
+        },
+        "intro_memory": {
+            "asked_topics": [],
+            "closed_topics": [],
+            "recent_teacher_lines": [],
+            "intro_flow": ["favorite_food", "sports", "family_cooking"],
+        },
         "intro_chunks": lesson["intro_chunks"],
         "story_chunks": lesson["story_chunks"],
         "teach_chunks": lesson["teach_chunks"],
