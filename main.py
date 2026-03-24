@@ -1233,8 +1233,11 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     update_language_usage(state, student_text)
     record_keywords(state, student_text)
 
-    if req.student_name and req.student_name.strip():
-        state["student_name"] = title_case_name(req.student_name.strip())
+    # only accept explicit student_name if it is a plausible real name
+    if req.student_name and req.student_name.strip() and not state.get("student_name"):
+        parsed_req_name = extract_student_name(req.student_name.strip())
+        if parsed_req_name:
+            state["student_name"] = parsed_req_name
 
     personal = teacher_personal_answer(state, student_text)
     if personal:
@@ -1251,7 +1254,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         return make_turn(state, f"{reaction} {followup}".strip(), True, False)
 
     parsed_name = extract_student_name(student_text)
-    if parsed_name:
+    if parsed_name and not state.get("student_name"):
         state["student_name"] = parsed_name
         state.setdefault("student_memory", {}).setdefault("known_facts", {})["student_name"] = parsed_name
 
@@ -1317,10 +1320,12 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     low = student_text.lower()
     if "mother" in low or "mom" in low or "mummy" in low:
         state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your mother"
-    if "father" in low or "dad" in low:
+    elif "father" in low or "dad" in low or "papa" in low:
         state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your father"
-    if "grandmother" in low or "grandma" in low:
+    elif "grandmother" in low or "grandma" in low or "dida" in low or "nani" in low:
         state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your grandmother"
+    elif "myself" in low or low == "me":
+        state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "you"
 
     favorite_food = state.get("student_memory", {}).get("favorite_food")
     intro_memory = state.setdefault("intro_memory", {})
@@ -1671,8 +1676,11 @@ def respond(req: RespondRequest):
     if req.teacher_name and req.teacher_name.strip():
         state["teacher_name"] = sanitize_teacher_name(req.teacher_name.strip())
 
-    if req.student_name and req.student_name.strip():
-        state["student_name"] = title_case_name(req.student_name.strip())
+    # do NOT blindly trust frontend student_name
+    if req.student_name and req.student_name.strip() and not state.get("student_name"):
+        parsed_req_name = extract_student_name(req.student_name.strip())
+        if parsed_req_name:
+            state["student_name"] = parsed_req_name
 
     incoming_language = req.preferred_language or req.language
     if incoming_language and incoming_language.strip():
