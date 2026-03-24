@@ -543,28 +543,23 @@ def guess_language_from_name(full_name: str) -> Optional[str]:
             return REGIONAL_GUESS_MAP[word]
     return None
 
-def detect_specific_language_name(text: str) -> Optional[str]:
-    low = text.lower()
-    language_map = {
-        "english": "English",
-        "hindi": "Hindi",
-        "hinglish": "Hinglish",
-        "bengali": "Bengali",
-        "bangla": "Bengali",
-        "tamil": "Tamil",
-        "telugu": "Telugu",
-        "marathi": "Marathi",
-        "gujarati": "Gujarati",
-        "malayalam": "Malayalam",
-        "kannada": "Kannada",
-        "punjabi": "Punjabi",
-        "odia": "Odia",
-        "assamese": "Assamese",
-    }
-    for key, value in language_map.items():
-        if key in low:
-            return value
-    return None
+if specific_language:
+    state["preferred_teaching_mode"] = specific_language
+    state.setdefault("student_memory", {})["preferred_language"] = specific_language
+    state["student_memory"]["strongest_language"] = specific_language
+    close_topic(state, "language_pref")
+    close_topic(state, "home_language")
+
+    reaction = mix_line_for_language(specific_language, "ack") or f"Very good. I got it — {specific_language} feels easiest for you."
+    joke = mix_line_for_language(specific_language, "joke")
+    followup = intro_followup_after_reaction(state, student_text)
+
+    return make_turn(
+        state,
+        f"{reaction} {joke} {followup}".strip(),
+        True,
+        False,
+    )
 
 def detect_special_language_request(text: str) -> Optional[str]:
     low = text.lower().strip()
@@ -1068,17 +1063,22 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         joke = mix_line_for_language(specific_language, "joke")
         return make_turn(state, f"{reaction} {joke}".strip(), True, False)
 
-    if parsed_mode and not state.get("preferred_teaching_mode"):
-        state["preferred_teaching_mode"] = parsed_mode
-        state.setdefault("student_memory", {})["preferred_language"] = parsed_mode
-        state["student_memory"]["strongest_language"] = parsed_mode
-        close_topic(state, "language_pref")
-        return make_turn(
-            state,
-            f"{mix_line_for_language(parsed_mode, 'ack') or f'Perfect. I will keep {parsed_mode} in mind while teaching you.'}",
-            True,
-            False,
-        )
+   if parsed_mode and not state.get("preferred_teaching_mode"):
+    state["preferred_teaching_mode"] = parsed_mode
+    state.setdefault("student_memory", {})["preferred_language"] = parsed_mode
+    state["student_memory"]["strongest_language"] = parsed_mode
+    close_topic(state, "language_pref")
+
+    reaction = mix_line_for_language(parsed_mode, "ack") or f"Perfect. I will keep {parsed_mode} in mind while teaching you."
+    joke = mix_line_for_language(parsed_mode, "joke")
+    followup = intro_followup_after_reaction(state, student_text)
+
+    return make_turn(
+        state,
+        f"{reaction} {joke} {followup}".strip(),
+        True,
+        False,
+    )
 
     merge_student_memory(state, extract_interest_memory(student_text))
 
