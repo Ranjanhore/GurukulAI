@@ -828,22 +828,19 @@ def build_intro_reaction_then_followup(state: Dict[str, Any], student_text: str)
 def intro_followup_after_reaction(state: Dict[str, Any], student_text: str) -> str:
     memory = state.setdefault("intro_memory", {})
     next_order = memory.setdefault("intro_flow", ["favorite_food", "sports", "family_cooking"])
-    pref = preferred_explanation_style(state)
 
     if next_order:
         next_topic = next_order.pop(0)
     else:
-        next_topic = random.choice(["favorite_food", "games", "sports", "family_cooking"])
+        next_topic = random.choice(["favorite_food", "sports", "family_cooking"])
 
     if next_topic == "favorite_food":
-        return "By the way, what food makes you happiest when it comes in front of you?"
-    if next_topic == "games":
-        return "Tell me, do you enjoy games more, or stories more?"
+        return "Now tell me, what food do you enjoy the most?"
     if next_topic == "sports":
-        return "Nice. Tell me, which sport do you like the most?"
+        return "And tell me one more thing — which sport or game do you enjoy the most?"
     if next_topic == "family_cooking":
-        return "One more thing — who usually makes food in your house?"
-    return mix_line_for_language(pref, "joke") or choose_phrase_variant(state, "comfort") or "Good, we are settling in nicely."
+        return "At home, who usually makes food for you?"
+    return "Tell me something you enjoy in your daily life."
 
 def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, done: bool, meta: Optional[Dict[str, Any]] = None) -> TurnResponse:
     append_history(state, "teacher", teacher_text)
@@ -1063,7 +1060,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         joke = mix_line_for_language(specific_language, "joke")
         return make_turn(state, f"{reaction} {joke}".strip(), True, False)
 
-   if parsed_mode and not state.get("preferred_teaching_mode"):
+  if parsed_mode and not state.get("preferred_teaching_mode"):
     state["preferred_teaching_mode"] = parsed_mode
     state.setdefault("student_memory", {})["preferred_language"] = parsed_mode
     state["student_memory"]["strongest_language"] = parsed_mode
