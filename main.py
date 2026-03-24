@@ -415,23 +415,46 @@ def speech_text(text: str, language: str = "English") -> str:
 # =========================================================
 def extract_student_name(text: str) -> Optional[str]:
     clean = text.strip()
-    patterns = ["my name is ", "i am ", "i'm ", "name is ", "mera naam "]
     low = clean.lower()
+
+    blocked_words = {
+        "english", "hindi", "hinglish", "bengali", "bangla", "tamil", "telugu",
+        "marathi", "gujarati", "malayalam", "kannada", "punjabi", "odia", "assamese",
+        "yes", "no", "ok", "okay", "myself", "me", "mine", "food", "salad", "salads",
+        "rice", "dal", "mango", "apple", "banana", "cricket", "football", "badminton",
+        "basketball", "kitchen", "mother", "father", "mom", "dad", "grandmother",
+        "grandma", "my", "sex", "male", "female", "home", "house", "teacher", "student",
+        "game", "sport", "sports", "chapter", "subject", "biology",
+    }
+
+    patterns = [
+        "my name is ",
+        "i am ",
+        "i'm ",
+        "name is ",
+        "mera naam ",
+    ]
+
     for pattern in patterns:
         if low.startswith(pattern):
-            return title_case_name(clean[len(pattern):].strip(" .,!"))
+            candidate = clean[len(pattern):].strip(" .,!?")
+            candidate_low = candidate.lower()
+            if candidate and candidate_low not in blocked_words:
+                parts = candidate.split()
+                if 1 <= len(parts) <= 3 and all(part.isalpha() and 2 <= len(part) <= 20 for part in parts):
+                    return title_case_name(candidate)
 
-    if len(clean.split()) <= 4 and clean.replace(" ", "").isalpha():
-        blocked = {
-            "english", "hindi", "hinglish", "bengali", "bangla", "tamil", "telugu",
-            "marathi", "gujarati", "malayalam", "kannada", "punjabi", "odia", "assamese",
-            "yes", "no", "ok", "okay"
-        }
-        if clean.lower() not in blocked:
-            return title_case_name(clean)
+    parts = clean.split()
+
+    # fallback only for real-looking multi-word names like "Ranjan Hore"
+    if (
+        2 <= len(parts) <= 3
+        and all(part.isalpha() and 2 <= len(part) <= 20 for part in parts)
+        and low not in blocked_words
+    ):
+        return title_case_name(clean)
 
     return None
-
 
 def detect_food_fact(text: str) -> Optional[str]:
     low = text.lower()
