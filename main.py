@@ -1166,6 +1166,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     if personal:
         return make_turn(state, personal, True, False)
 
+    # language-switch requests
     special_lang = detect_special_language_request(student_text)
     if special_lang:
         state["preferred_teaching_mode"] = special_lang
@@ -1176,28 +1177,46 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         followup = intro_followup_after_reaction(state, student_text)
         return make_turn(state, f"{reaction} {followup}".strip(), True, False)
 
+    # ---------- NAME CAPTURE: always respond ----------
     parsed_name = extract_student_name(student_text)
-    if not state.get("student_name") and parsed_name:
+    if parsed_name and not state.get("student_name"):
         state["student_name"] = parsed_name
         state.setdefault("student_memory", {}).setdefault("known_facts", {})["student_name"] = parsed_name
 
-        message = react_to_name(parsed_name)
+        # guess regional language from surname
+        guessed = guess_language_from_name(parsed_name)
+        if guessed and not state.get("student_memory", {}).get("home_language"):
+            state.setdefault("student_memory", {})["home_language"] = guessed
+            intro["guessed_language"] = guessed
+
+        message_parts = [react_to_name(parsed_name)]
+
         if not intro["mic_explained"]:
             intro["mic_explained"] = True
-            message += (
-                " Now let me explain how this class will work. During our intro chat, your mic stays active. "
+            message_parts.append(
+                "Now let me explain how this class will work. During our intro chat, your mic stays active. "
                 "If you speak, I will stop and listen. Once teaching starts, the mic becomes manual, and then "
                 "you need to press and hold the mic button below the screen in the center."
             )
 
         stored_pref = state.get("student_memory", {}).get("preferred_language")
         if stored_pref:
-            message += f" I already remember that {stored_pref} feels comfortable for you."
-            message += f" {intro_followup_after_reaction(state, student_text)}"
+            message_parts.append(f"I already remember that {stored_pref} feels comfortable for you.")
+            message_parts.append(intro_followup_after_reaction(state, student_text))
         else:
-            message += " One more thing, which exact language feels easiest for you while learning: English, Hindi, Bangla, Tamil, Telugu, or another language?"
-        return make_turn(state, message, True, False)
+            if guessed == "Bengali":
+                message_parts.append("By the way, tomar surname shune mone hochhe tumi hoyto Bangla-o bhalo bujho.")
+            elif guessed == "Hindi":
+                message_parts.append("By the way, tumhara surname sunke lag raha hai Hindi bhi tumhe natural lag sakti hai.")
+            elif guessed:
+                message_parts.append(f"By the way, your surname gives me a little feeling that {guessed} may also sound familiar to you.")
+            message_parts.append(
+                "One more thing, which exact language feels easiest for you while learning: English, Hindi, Bangla, Tamil, Telugu, or another language?"
+            )
 
+        return make_turn(state, " ".join(message_parts).strip(), True, False)
+
+    # explicit language answer
     specific_language = detect_specific_language_name(student_text)
     parsed_mode = detect_preferred_teaching_mode(student_text)
 
@@ -1230,12 +1249,6 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your father"
     if "grandmother" in low or "grandma" in low:
         state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your grandmother"
-
-    if state.get("student_name") and not intro.get("guessed_language"):
-        guessed = guess_language_from_name(state["student_name"])
-        if guessed:
-            intro["guessed_language"] = guessed
-            state.setdefault("student_memory", {})["home_language"] = guessed
 
     favorite_food = state.get("student_memory", {}).get("favorite_food")
     intro_memory = state.setdefault("intro_memory", {})
@@ -1282,7 +1295,6 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         upsert_student_brain_memory(state)
 
     return make_turn(state, intro_followup_after_reaction(state, student_text), True, False)
-
 
 def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) -> TurnResponse:
     meaning_word = detect_meaning_request(text)
