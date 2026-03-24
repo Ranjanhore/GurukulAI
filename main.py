@@ -14,7 +14,7 @@ from supabase import create_client, Client
 from openai import OpenAI
 
 
-app = FastAPI(title="GurukulAI Backend", version="10.6")
+app = FastAPI(title="GurukulAI Backend", version="10.7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -144,13 +144,33 @@ FOOD_FACTS = {
 }
 
 INTEREST_KEYWORDS = [
-    "mango", "banana", "apple", "cricket", "football", "badminton", "basketball",
-    "minecraft", "free fire", "roblox", "chess", "carrom", "ludo", "story",
-    "kitchen", "mother", "father", "grandmother", "bangla", "bengali", "hindi",
-    "english", "tamil", "telugu",
+    "mango",
+    "banana",
+    "apple",
+    "cricket",
+    "football",
+    "badminton",
+    "basketball",
+    "minecraft",
+    "free fire",
+    "roblox",
+    "chess",
+    "carrom",
+    "ludo",
+    "story",
+    "kitchen",
+    "mother",
+    "father",
+    "grandmother",
+    "bangla",
+    "bengali",
+    "hindi",
+    "english",
+    "tamil",
+    "telugu",
 ]
 
-PRONUNCIATION_MAP = {
+PRONUNCIATION_MAP_ENGLISH = {
     "Teacher Asha Sharma": "Teacher Asha Shar-maa",
     "Asha Sharma": "Asha Shar-maa",
     "Biology": "Bye-ol-uh-jee",
@@ -167,6 +187,60 @@ PRONUNCIATION_MAP = {
     "petiole": "pet-ee-ole",
     "parallel": "pa-ruh-lel",
     "carbon dioxide": "car-bun dye-oxide",
+}
+
+PRONUNCIATION_MAP_HINDI = {
+    "Bahut": "Bahut",
+    "badhiya": "bad-hi-yaa",
+    "samjhaungi": "sam-jhaa-oon-gee",
+    "dhyan": "dhyaan",
+    "dhyan se": "dhyaan se",
+    "sawal": "sawaal",
+    "jawab": "jawaab",
+    "bilkul": "bil-kul",
+    "aaj": "aaj",
+    "tum": "tum",
+    "hum": "hum",
+    "samjhenge": "sam-jhen-ge",
+    "Hindi": "Hin-dee",
+}
+
+PRONUNCIATION_MAP_BENGALI = {
+    "amra": "am-ra",
+    "Bangla": "Baang-la",
+    "bangla": "baang-la",
+    "bhalo": "bhaa-lo",
+    "acho": "aa-cho",
+    "tumi": "tu-mi",
+    "porbo": "por-bo",
+    "darun": "daa-roon",
+    "ekdom": "ek-dom",
+    "nijer": "ni-jer",
+    "golpo": "gol-po",
+    "shikhbo": "shikh-bo",
+    "bujhte": "bujh-te",
+}
+
+PRONUNCIATION_MAP_TAMIL = {
+    "Tamil": "Ta-mil",
+    "comfortable-na": "comfortable-naa",
+    "solluven": "sol-loo-ven",
+    "irukkum": "i-ruk-kum",
+    "ippo": "ip-po",
+    "innaiku": "in-nai-ku",
+    "chapter-ku": "chapter-ku",
+    "povom": "po-vom",
+}
+
+PRONUNCIATION_MAP_TELUGU = {
+    "Telugu": "Te-lu-gu",
+    "chaala": "chaa-laa",
+    "bagundi": "ba-gun-dee",
+    "mix chestanu": "mix ches-taa-nu",
+    "easy ga": "ee-zee gaa",
+    "untundi": "oon-too-ndi",
+    "ippudu": "ip-pu-du",
+    "veldaam": "vel-daam",
 }
 
 
@@ -293,18 +367,39 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
         end = text.rfind("}")
         if start >= 0 and end > start:
             try:
-                return json.loads(text[start:end + 1])
+                return json.loads(text[start : end + 1])
             except Exception:
                 pass
     return {}
 
 
-def speech_text(text: str) -> str:
+def apply_alias_map(text: str, alias_map: Dict[str, str]) -> str:
     out = text
-    for k, v in PRONUNCIATION_MAP.items():
-        out = out.replace(k, v)
+    for original, spoken in alias_map.items():
+        out = out.replace(original, spoken)
+    return out
+
+
+def build_speech_text(text: str, language: str) -> str:
+    out = text
+    out = apply_alias_map(out, PRONUNCIATION_MAP_ENGLISH)
+    lang = (language or "").strip()
+
+    if lang == "Hindi":
+        out = apply_alias_map(out, PRONUNCIATION_MAP_HINDI)
+    elif lang == "Bengali":
+        out = apply_alias_map(out, PRONUNCIATION_MAP_BENGALI)
+    elif lang == "Tamil":
+        out = apply_alias_map(out, PRONUNCIATION_MAP_TAMIL)
+    elif lang == "Telugu":
+        out = apply_alias_map(out, PRONUNCIATION_MAP_TELUGU)
+
     out = out.replace("—", ", ").replace(";", ", ")
     return out
+
+
+def speech_text(text: str, language: str = "English") -> str:
+    return build_speech_text(text, language)
 
 
 def save_live_session(state: Dict[str, Any]) -> None:
@@ -450,25 +545,27 @@ def insert_progress_log(state: Dict[str, Any], teacher_feedback: str = "", paren
         return
     memory = state.get("student_memory", {}) or {}
     try:
-        supabase.table("student_progress_log").insert({
-            "student_name": state.get("student_name"),
-            "board": state.get("board"),
-            "class_level": state.get("class_name"),
-            "subject": state.get("subject"),
-            "chapter": state.get("chapter"),
-            "preferred_language": memory.get("preferred_language") or state.get("language"),
-            "strongest_language": memory.get("strongest_language"),
-            "communication_score": memory.get("communication_improvement_score", 0),
-            "confidence_score": state.get("confidence_score", 50),
-            "stress_score": state.get("stress_score", 20),
-            "xp_score": state.get("xp", 0),
-            "english_improvement_score": memory.get("english_improvement_score", 0),
-            "regional_language_improvement_score": memory.get("regional_language_improvement_score", 0),
-            "attention_score": memory.get("attention_score", 0),
-            "participation_score": memory.get("participation_score", 0),
-            "teacher_feedback": teacher_feedback,
-            "parent_feedback": parent_feedback,
-        }).execute()
+        supabase.table("student_progress_log").insert(
+            {
+                "student_name": state.get("student_name"),
+                "board": state.get("board"),
+                "class_level": state.get("class_name"),
+                "subject": state.get("subject"),
+                "chapter": state.get("chapter"),
+                "preferred_language": memory.get("preferred_language") or state.get("language"),
+                "strongest_language": memory.get("strongest_language"),
+                "communication_score": memory.get("communication_improvement_score", 0),
+                "confidence_score": state.get("confidence_score", 50),
+                "stress_score": state.get("stress_score", 20),
+                "xp_score": state.get("xp", 0),
+                "english_improvement_score": memory.get("english_improvement_score", 0),
+                "regional_language_improvement_score": memory.get("regional_language_improvement_score", 0),
+                "attention_score": memory.get("attention_score", 0),
+                "participation_score": memory.get("participation_score", 0),
+                "teacher_feedback": teacher_feedback,
+                "parent_feedback": parent_feedback,
+            }
+        ).execute()
     except Exception:
         pass
 
@@ -484,18 +581,20 @@ def insert_parent_guidance_report(
     if not supabase or not state.get("student_name"):
         return
     try:
-        supabase.table("parent_guidance_reports").insert({
-            "student_name": state.get("student_name"),
-            "board": state.get("board"),
-            "class_level": state.get("class_name"),
-            "subject": state.get("subject"),
-            "chapter": state.get("chapter"),
-            "summary": summary,
-            "strengths": strengths,
-            "needs_focus": needs_focus,
-            "teacher_suggestions": teacher_suggestions,
-            "parent_suggestions": parent_suggestions,
-        }).execute()
+        supabase.table("parent_guidance_reports").insert(
+            {
+                "student_name": state.get("student_name"),
+                "board": state.get("board"),
+                "class_level": state.get("class_name"),
+                "subject": state.get("subject"),
+                "chapter": state.get("chapter"),
+                "summary": summary,
+                "strengths": strengths,
+                "needs_focus": needs_focus,
+                "teacher_suggestions": teacher_suggestions,
+                "parent_suggestions": parent_suggestions,
+            }
+        ).execute()
     except Exception:
         pass
 
@@ -535,24 +634,6 @@ def pick_teacher_from_db(
 
 def append_history(state: Dict[str, Any], role: str, text: str) -> None:
     state.setdefault("history", []).append({"role": role, "text": text})
-
-
-def extract_student_name(text: str) -> Optional[str]:
-    clean = text.strip()
-    patterns = ["my name is ", "i am ", "i'm ", "name is ", "mera naam "]
-    low = clean.lower()
-    for pattern in patterns:
-        if low.startswith(pattern):
-            return title_case_name(clean[len(pattern):].strip(" .,!"))
-    if len(clean.split()) <= 4 and clean.replace(" ", "").isalpha():
-        blocked = {
-            "english", "hindi", "hinglish", "bengali", "bangla", "tamil", "telugu",
-            "marathi", "gujarati", "malayalam", "kannada", "punjabi", "odia", "assamese",
-            "yes", "no", "ok", "okay"
-        }
-        if clean.lower() not in blocked:
-            return title_case_name(clean)
-    return None
 
 
 def detect_food_fact(text: str) -> Optional[str]:
@@ -742,8 +823,15 @@ def teacher_personal_answer(state: Dict[str, Any], student_text: str) -> Optiona
 def detect_low_english(text: str) -> bool:
     low = text.lower().strip()
     weak_patterns = [
-        "i goed", "he go", "she go", "i am understanding", "i no understand",
-        "i not know", "me like", "i not able", "i no like",
+        "i goed",
+        "he go",
+        "she go",
+        "i am understanding",
+        "i no understand",
+        "i not know",
+        "me like",
+        "i not able",
+        "i no like",
     ]
     return any(p in low for p in weak_patterns)
 
@@ -761,6 +849,67 @@ def maybe_gentle_language_model(state: Dict[str, Any], student_text: str) -> Opt
 def preferred_explanation_style(state: Dict[str, Any]) -> str:
     pref = state.get("preferred_teaching_mode") or state.get("student_memory", {}).get("preferred_language") or state.get("language")
     return pretty_language(pref)
+
+
+def explain_technical_word_meaning(word: str, language: str) -> Optional[str]:
+    key = word.lower().strip()
+    meanings = {
+        "photosynthesis": {
+            "Hindi": "photosynthesis ka matlab hai plant sunlight, water aur carbon dioxide use karke apna food banata hai.",
+            "Bengali": "photosynthesis mane gachh surjer alo, jol aar carbon dioxide use kore nijer khabar toiri kore.",
+            "Tamil": "photosynthesis na plant sunlight, water, carbon dioxide use panni thanoda food ready pannudhu.",
+            "Telugu": "photosynthesis ante plant sunlight, water, carbon dioxide use chesi tana food tayaru chesukuntundi.",
+            "English": "photosynthesis means a plant makes its own food using sunlight, water, and carbon dioxide.",
+        },
+        "chlorophyll": {
+            "Hindi": "chlorophyll leaf ka green pigment hai jo sunlight absorb karta hai.",
+            "Bengali": "chlorophyll holo patar sobuj rong-er pigment, ja surjer alo dhore.",
+            "Tamil": "chlorophyll leaf-oda green pigment, sunlight absorb pannudhu.",
+            "Telugu": "chlorophyll ante leaf lo unna green pigment, sunlight absorb chestundi.",
+            "English": "chlorophyll is the green pigment in leaves that absorbs sunlight.",
+        },
+        "stomata": {
+            "Hindi": "stomata leaf ke chhote openings hote hain jo gaseous exchange mein help karte hain.",
+            "Bengali": "stomata holo patar chhoto chhoto opening, ja gas exchange-e help kore.",
+            "Tamil": "stomata na leaf la irukkara chinna openings, gas exchange-ku help pannum.",
+            "Telugu": "stomata ante leaf meeda unna chinna openings, gas exchange lo help chestayi.",
+            "English": "stomata are tiny openings on leaves that help in gas exchange.",
+        },
+        "lamina": {
+            "Hindi": "lamina leaf ka broad flat hissa hota hai.",
+            "Bengali": "lamina holo patar chora chhapta angsho.",
+            "Tamil": "lamina na leaf-oda broad flat part.",
+            "Telugu": "lamina ante leaf yokka broad flat part.",
+            "English": "lamina is the broad flat part of a leaf.",
+        },
+    }
+    if key in meanings:
+        return meanings[key].get(language) or meanings[key].get("English")
+    return None
+
+
+def detect_meaning_request(text: str) -> Optional[str]:
+    low = text.lower()
+    technical_words = ["photosynthesis", "chlorophyll", "stomata", "lamina"]
+    asks_meaning = any(
+        phrase in low
+        for phrase in [
+            "meaning of",
+            "what is",
+            "matlab",
+            "meaning bolo",
+            "hindi me meaning",
+            "bangla te meaning",
+            "tamil la meaning",
+            "telugu lo meaning",
+        ]
+    )
+    if not asks_meaning:
+        return None
+    for word in technical_words:
+        if word in low:
+            return word
+    return None
 
 
 def mix_line_for_language(language: str, key: str) -> str:
@@ -842,7 +991,8 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
     append_history(state, "teacher", teacher_text)
     save_live_session(state)
     meta = meta or {}
-    meta["speech_text"] = speech_text(teacher_text)
+    preferred_lang = preferred_explanation_style(state)
+    meta["speech_text"] = speech_text(teacher_text, preferred_lang)
     return TurnResponse(
         ok=True,
         session_id=state["session_id"],
@@ -977,6 +1127,7 @@ You are GurukulAI Teacher in guided teaching mode.
 Rules:
 - Stay grounded in the current chunk.
 - Default to mixed language if preferred_teaching_mode is not English.
+- Keep technical words in English.
 - If student is weak in English, explain in mixed English + Hindi or regional support.
 - If student says incorrect English, gently correct once, then continue kindly.
 - Keep answers concise, warm, and personal.
@@ -994,12 +1145,15 @@ Context:
 
 
 def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRequest) -> TurnResponse:
-    intro = state.setdefault("intro_profile", {
-        "intro_turn_count": 0,
-        "ready_to_start": False,
-        "guessed_language": None,
-        "mic_explained": False,
-    })
+    intro = state.setdefault(
+        "intro_profile",
+        {
+            "intro_turn_count": 0,
+            "ready_to_start": False,
+            "guessed_language": None,
+            "mic_explained": False,
+        },
+    )
     intro["intro_turn_count"] += 1
 
     update_language_usage(state, student_text)
@@ -1131,6 +1285,13 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
 
 
 def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) -> TurnResponse:
+    meaning_word = detect_meaning_request(text)
+    if meaning_word:
+        pref = preferred_explanation_style(state)
+        meaning = explain_technical_word_meaning(meaning_word, pref)
+        if meaning:
+            return make_turn(state, meaning, True, False, {"teach_action": "meaning_explanation"})
+
     correction = maybe_gentle_language_model(state, text)
     if correction:
         return make_turn(state, correction, True, False, {"teach_action": "english_correction"})
@@ -1157,7 +1318,7 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
         if pref == "English":
             msg = "Photosynthesis is the process by which plants make their own food using sunlight, water, and carbon dioxide."
         elif pref == "Bengali":
-            msg = "Photosynthesis mane gachh surjer alo, jol, aar carbon dioxide use kore nijer khabar toiri kore. Simple bhabe bolo, gachh nijer khabar nijeyi banay."
+            msg = "Photosynthesis mane gachh surjer alo, jol aar carbon dioxide use kore nijer khabar toiri kore."
         else:
             msg = "Photosynthesis means plants make their own food using sunlight, water, and carbon dioxide. Simple language mein, plant apna khana khud banata hai."
         return make_turn(state, msg, False, False)
@@ -1195,9 +1356,7 @@ def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
 
 def answer_during_homework(state: Dict[str, Any], text: str) -> TurnResponse:
     state["phase"] = "DONE"
-    state.setdefault("student_memory", {})["last_session_summary"] = (
-        f"Completed chapter {state.get('chapter')} in {state.get('subject')}."
-    )
+    state.setdefault("student_memory", {})["last_session_summary"] = f"Completed chapter {state.get('chapter')} in {state.get('subject')}."
     upsert_student_brain_memory(state)
 
     parent_summary = "Student participated with improving confidence."
