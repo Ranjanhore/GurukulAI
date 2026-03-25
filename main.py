@@ -850,18 +850,102 @@ def intro_is_ready_to_transition(state: Dict[str, Any]) -> bool:
     min_turns = int(intro.get("min_intro_turns", 10))
     return (turns >= min_turns and has_name and has_lang and enough_context) or intro.get("ready_to_start") is True
 
+def bind_answer_to_last_intro_topic(state: Dict[str, Any], student_text: str) -> None:
+    intro_memory = state.setdefault("intro_memory", {})
+    memory = state.setdefault("student_memory", {})
+    last_topic = normalize_topic_name(intro_memory.get("last_topic", ""))
+    low = (student_text or "").lower().strip()
+
+    if not last_topic:
+        return
+
+    answered_topics = set(intro_memory.get("answered_topics", []))
+
+    if last_topic == "favorite_food":
+        for food in FOOD_FACTS.keys():
+            if re.search(rf"\b{re.escape(food)}\b", low):
+                memory["favorite_food"] = food
+                answered_topics.add(last_topic)
+                intro_memory["answered_topics"] = list(answered_topics)
+                return
+
+    if last_topic == "favorite_sport":
+        for sport in SPORT_FACTS.keys():
+            if re.search(rf"\b{re.escape(sport)}\b", low):
+                memory["favorite_sport"] = sport
+                answered_topics.add(last_topic)
+                intro_memory["answered_topics"] = list(answered_topics)
+                return
+
+    if last_topic == "favorite_hobby":
+        hobby = detect_hobby(student_text)
+        if hobby:
+            memory["favorite_hobby"] = hobby
+            answered_topics.add(last_topic)
+            intro_memory["answered_topics"] = list(answered_topics)
+            return
+
+    if last_topic == "favorite_subject":
+        subject = detect_favorite_subject(student_text)
+        if subject:
+            memory["favorite_subject"] = subject
+            answered_topics.add(last_topic)
+            intro_memory["answered_topics"] = list(answered_topics)
+            return
+
+    if last_topic == "other_interest":
+        interest = detect_other_interest(student_text)
+        if interest:
+            memory["other_interest"] = interest
+            answered_topics.add(last_topic)
+            intro_memory["answered_topics"] = list(answered_topics)
+            return
+
+    if last_topic == "who_loves_you_more":
+        if "mother" in low or "mom" in low or "mummy" in low:
+            memory.setdefault("family_context", {})["who_loves_you_more"] = "mother"
+            answered_topics.add(last_topic)
+            intro_memory["answered_topics"] = list(answered_topics)
+            return
+        if "father" in low or "dad" in low or "papa" in low:
+            memory.setdefault("family_context", {})["who_loves_you_more"] = "father"
+            answered_topics.add(last_topic)
+            intro_memory["answered_topics"] = list(answered_topics)
+            return
+        if "grandmother" in low or "grandma" in low or "dida" in low or "nani" in low:
+            memory.setdefault("family_context", {})["who_loves_you_more"] = "grandmother"
+            answered_topics.add(last_topic)
+            intro_memory["answered_topics"] = list(answered_topics)
+            return
+        if "everyone" in low or "all" in low:
+            memory.setdefault("family_context", {})["who_loves_you_more"] = "everyone"
+            answered_topics.add(last_topic)
+            intro_memory["answered_topics"] = list(answered_topics)
+            return
+
+    if last_topic == "language_check":
+        lang = detect_specific_language_name(student_text) or detect_preferred_teaching_mode(student_text)
+        if lang:
+            lang = pretty_language(lang)
+            memory["preferred_language"] = lang
+            memory["strongest_language"] = lang
+            state["preferred_teaching_mode"] = lang
+            answered_topics.add(last_topic)
+            intro_memory["answered_topics"] = list(answered_topics)
+            return
+
+
 
 def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRequest) -> TurnResponse:
+    bind_answer_to_last_intro_topic(state, student_text)
     intro = state.setdefault(
         "intro_profile",
         {
-            "intro_turn_count": 0,
-            "ready_to_start": False,
-            "guessed_language": None,
-            "mic_explained": False,
-            "mic_confirmed": False,
-            "min_intro_turns": 10,
-            "intro_started_at": time.time(),
+           intro["intro_turn_count"] += 1
+update_language_usage(state, student_text)
+record_keywords(state, student_text)
+merge_student_memory(state, extract_extended_intro_memory(student_text))
+bind_answer_to_last_intro_topic(state, student_text)
         },
     )
     intro["intro_turn_count"] += 1
@@ -1057,6 +1141,7 @@ def start_session(req: SessionStartRequest):
     chapter_title = (req.chapter or req.chapter_title or "").strip()
     raw_language = pretty_language(req.preferred_language or req.language or "")
     student_name = title_case_name(req.student_name.strip()) if (req.student_name or "").strip() else ""
+    "answered_topics": [],
 
     if not board:
         raise HTTPException(status_code=422, detail="board is required")
