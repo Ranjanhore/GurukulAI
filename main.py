@@ -988,29 +988,104 @@ def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject
         lines.append("Aaj hum chapter ko real life story ke through samjhenge.")
 
     return lines
+def load_chapter_module_from_db(board: str, class_name: str, subject: str, chapter: str, part_no: int = 1) -> Optional[Dict[str, Any]]:
+    if not supabase:
+        return None
 
+    try:
+        chapter_row = (
+            supabase.table("chapters")
+            .select("id, board, class_level, subject, title")
+            .eq("board", board)
+            .eq("class_level", int(class_name))
+            .eq("subject", subject)
+            .eq("title", chapter)
+            .limit(1)
+            .execute()
+        )
 
-def generate_lesson_content(board: str, class_name: str, subject: str, chapter: str, teacher_name: str) -> Dict[str, Any]:
+        chapter_item = first_or_none(chapter_row.data)
+        if not chapter_item:
+            return None
+
+        chapter_id = chapter_item["id"]
+
+        part_row = (
+            supabase.table("chapter_parts")
+            .select("*")
+            .eq("chapter_id", chapter_id)
+            .eq("part_no", int(part_no))
+            .eq("active", True)
+            .limit(1)
+            .execute()
+        )
+
+        part_item = first_or_none(part_row.data)
+        if not part_item:
+            return None
+
+        quiz_row = (
+            supabase.table("chapter_quiz_questions")
+            .select("*")
+            .eq("chapter_part_id", part_item["id"])
+            .eq("active", True)
+            .order("position")
+            .execute()
+        )
+
+        return {
+            "part_title": part_item.get("title", ""),
+            "duration_minutes": part_item.get("duration_minutes", 30),
+            "learning_goals": part_item.get("learning_goals", []),
+            "story_chunks": part_item.get("story_chunks", []),
+            "teach_chunks": part_item.get("teach_chunks", []),
+            "recap_chunks": part_item.get("recap_chunks", []),
+            "homework_items": part_item.get("homework_items", []),
+            "quiz_questions": [
+                {
+                    "question": q.get("question", ""),
+                    "answer": q.get("answer", ""),
+                    "accepted_answers": q.get("accepted_answers", []),
+                    "explanation": q.get("explanation", ""),
+                }
+                for q in (quiz_row.data or [])
+            ],
+        }
+
+    except Exception as e:
+        print("DB chapter load failed:", repr(e))
+        return None
+
+def generate_lesson_content(board: str, class_name: str, subject: str, chapter: str, teacher_name: str, part_no: int = 1) -> Dict[str, Any]:
     greeting = current_greeting()
+
+    db_module = load_chapter_module_from_db(board, class_name, subject, chapter, part_no=part_no)
+    if db_module:
+        return {
+            "intro_chunks": [f"{greeting}! I am {teacher_name}. First tell me your full name once nicely."],
+            "story_chunks": db_module.get("story_chunks", []),
+            "teach_chunks": db_module.get("teach_chunks", []),
+            "quiz_questions": db_module.get("quiz_questions", []),
+            "homework_items": db_module.get("homework_items", []),
+            "part_title": db_module.get("part_title", ""),
+            "duration_minutes": db_module.get("duration_minutes", 30),
+            "learning_goals": db_module.get("learning_goals", []),
+            "recap_chunks": db_module.get("recap_chunks", []),
+        }
+
+    # fallback if DB has no content
     return {
         "intro_chunks": [f"{greeting}! I am {teacher_name}. First tell me your full name once nicely."],
         "story_chunks": [],
         "teach_chunks": [
-            "A typical leaf has three main visible parts: leaf base, petiole, and lamina. The lamina is the broad flat green part.",
-            "Inside the leaf there are veins and veinlets. These help in transport of water, minerals, and prepared food.",
-            "The green color comes from chlorophyll. This pigment helps in photosynthesis, where plants make food using sunlight, water, and carbon dioxide.",
-            "Tiny openings called stomata are usually present on the leaf surface. They help in gaseous exchange and transpiration.",
-            "Leaves can have different venation patterns like reticulate venation and parallel venation.",
-            "So a leaf is both a kitchen and a breathing surface for the plant.",
+            "Let us begin the chapter step by step."
         ],
-        "quiz_questions": [
-            {"question": "What is the broad flat green part of a leaf called?", "answer": "lamina", "explanation": "The broad flat green part of a leaf is called the lamina."},
-            {"question": "Which pigment helps in photosynthesis?", "answer": "chlorophyll", "explanation": "Chlorophyll is the pigment that absorbs sunlight for photosynthesis."},
-        ],
-        "homework_items": [
-            "Draw a neat diagram of a leaf and label leaf base, petiole, lamina, and veins.",
-            "Observe two leaves at home and write whether their venation is parallel or reticulate.",
-        ],
+        "quiz_questions": [],
+        "homework_items": [],
+        "part_title": "",
+        "duration_minutes": 30,
+        "learning_goals": [],
+        "recap_chunks": [],
     }
 
 # =========================================================
@@ -1116,6 +1191,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         )
 
         parts = [react_to_name(parsed_name)]
+
         if guessed:
             parts.append(f"I also get a small feeling that {guessed} may sound familiar to you.")
 
@@ -1123,20 +1199,14 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             intro["mic_explained"] = True
             parts.append(build_mic_instruction(language_for_mic))
             parts.append(build_mic_understanding_prompt(language_for_mic))
-        else:
-            next_prompt = next_intro_prompt(state)
-            if next_prompt:
-                parts.append(next_prompt)
-            else:
-                intro["ready_to_start"] = True
+            return make_turn(state, " ".join(parts).strip(), True, False)
 
-        if intro.get("ready_to_start"):
-            pref = preferred_explanation_style(state)
-            state["phase"] = "STORY"
-            state["story_chunks"] = build_story_from_student_memory(state, state.get("chapter", ""), state.get("subject", ""))
-            parts.append(mix_line_for_language(pref, "start") or "Now let us get into today’s chapter.")
+        next_prompt = next_intro_prompt(state)
+        if next_prompt:
+            parts.append(next_prompt)
+            return make_turn(state, " ".join(parts).strip(), True, False)
 
-        return make_turn(state, " ".join(parts).strip(), state["phase"] == "INTRO", False)
+        intro["ready_to_start"] = True
 
     chosen_language = detect_specific_language_name(student_text) or detect_preferred_teaching_mode(student_text)
     if chosen_language:
@@ -1155,11 +1225,11 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             reply = (
                 f"Very nice. I noted that {chosen_language} feels comfortable for you. "
                 f"So I will naturally mix languages as needed, and keep important technical terms in English. "
-                f"{build_mic_instruction(chosen_language)} "
+                f"{build_mic_instruction(chosen_language)}"
             )
             next_prompt = next_intro_prompt(state)
             if next_prompt:
-                reply += next_prompt
+                reply = f"{reply} {next_prompt}"
                 return make_turn(state, reply.strip(), True, False)
 
         reaction = mix_line_for_language(chosen_language, "ack") or f"Very good. I noted {chosen_language}."
@@ -1172,7 +1242,13 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             intro["mic_confirmed"] = True
             next_prompt = next_intro_prompt(state)
             if next_prompt:
-                return make_turn(state, f"Wonderful. Then we will continue comfortably. {next_prompt}", True, False)
+                return make_turn(
+                    state,
+                    f"Wonderful. Then we will continue comfortably. {next_prompt}",
+                    True,
+                    False,
+                )
+
         if detect_negative_signal(student_text):
             lang = (
                 state.get("preferred_teaching_mode")
@@ -1180,26 +1256,58 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
                 or state.get("language")
                 or "English"
             )
-            return make_turn(state, f"No problem at all. {build_mic_instruction(lang)} {build_mic_understanding_prompt(lang)}", True, False)
+            return make_turn(
+                state,
+                f"No problem at all. {build_mic_instruction(lang)} {build_mic_understanding_prompt(lang)}",
+                True,
+                False,
+            )
 
     interest_reaction = react_to_interest(state, student_text)
     if interest_reaction:
         next_prompt = next_intro_prompt(state)
+
         if next_prompt:
+            # key fix:
+            # do NOT wait for random extra student reply if a next prompt exists
             return make_turn(state, f"{interest_reaction} {next_prompt}", True, False)
 
         if intro_is_ready_to_transition(state):
-            pref = preferred_explanation_style(state)
-            state["phase"] = "STORY"
-            state["story_chunks"] = build_story_from_student_memory(state, state.get("chapter", ""), state.get("subject", ""))
-            preface = (
-                f"{interest_reaction} "
-                f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
-                "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
-            )
-            return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
+          pref = preferred_explanation_style(state)
+state["phase"] = "STORY"
+state["story_chunks"] = build_story_from_student_memory(
+    state,
+    state.get("chapter", ""),
+    state.get("subject", ""),
+)
 
-        return make_turn(state, interest_reaction, True, False)
+preface = (
+    f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
+    "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
+)
+
+return make_turn(
+    state,
+    preface,
+    False,
+    False,
+    {"resume_phase": "STORY"}
+)
+
+        # if no next prompt, push story automatically instead of stopping
+        pref = preferred_explanation_style(state)
+        state["phase"] = "STORY"
+        state["story_chunks"] = build_story_from_student_memory(
+            state,
+            state.get("chapter", ""),
+            state.get("subject", ""),
+        )
+        preface = (
+            f"{interest_reaction} "
+            f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
+            "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
+        )
+        return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
 
     if is_short_interest_reply(student_text):
         next_prompt = next_intro_prompt(state)
@@ -1224,7 +1332,11 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
 
     pref = preferred_explanation_style(state)
     state["phase"] = "STORY"
-    state["story_chunks"] = build_story_from_student_memory(state, state.get("chapter", ""), state.get("subject", ""))
+    state["story_chunks"] = build_story_from_student_memory(
+        state,
+        state.get("chapter", ""),
+        state.get("subject", ""),
+    )
 
     preface = (
         f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
@@ -1367,7 +1479,7 @@ def start_session(req: SessionStartRequest):
     teacher_code = teacher.get("teacher_code") or req.teacher_code
     teacher_voice_id = teacher.get("voice_id") or ELEVENLABS_VOICE_ID or None
     teacher_persona = get_teacher_persona_from_db(teacher_code, teacher_name)
-    lesson = generate_lesson_content(board, class_name, subject, chapter_title, teacher_name)
+    lesson = generate_lesson_content(board, class_name, subject, chapter_title, teacher_name, part_no=int(req.part_no or 1))
     session_id = str(uuid.uuid4())
     existing_student_memory = load_student_brain_memory(student_name, board, class_name)
     remembered_pref = pretty_language(existing_student_memory.get("preferred_language") or "")
