@@ -94,6 +94,17 @@ REGIONAL_GUESS_MAP = {
     "gowda": "Kannada",
 }
 
+PRONUNCIATION_MAP_BENGALI.update({
+    "shohoj": "sho-hoj",
+    "bhabe": "bha-be",
+    "shomoy": "sho-moy",
+    "sathe sathe": "sha-the sha-the",
+    "shuru": "shu-ru",
+    "majhkhane": "maj-kha-ne",
+    "ache": "aa-che",
+    "bolbe": "bol-be",
+})
+
 LANGUAGE_MIX_LINES = {
     "Bengali": {
         "ack": "Darun, tumi Bangla te comfortable. Tahole ami Bangla mix kore porabo.",
@@ -195,12 +206,10 @@ INTRO_TOPICS = [
 SUBJECT_KEYWORDS = {
     "science": ["science", "biology", "physics", "chemistry"],
     "math": ["math", "maths", "mathematics"],
-    "english": ["english"],
+    "english": ["english subject", "subject english"],
     "history": ["history"],
     "geography": ["geography"],
-    "computer": ["computer", "coding", "programming"],
-    "hindi": ["hindi"],
-    "bengali": ["bengali", "bangla"],
+    "computer": ["computer", "computer science"],
 }
 
 SUBJECT_SIMPLE_QUESTIONS = {
@@ -695,12 +704,16 @@ def detect_negative_signal(text: str) -> bool:
     ]
     return any(p in low for p in negatives)
 
-
 def detect_hobby(text: str) -> Optional[str]:
-    low = (text or "").lower()
-    hobbies = ["drawing", "singing", "dancing", "reading", "story", "stories", "gaming", "painting", "music", "craft", "coding"]
+    low = (text or "").lower().strip()
+    hobbies = [
+        "drawing", "singing", "dancing", "reading", "story", "stories",
+        "gaming", "painting", "music", "craft", "coding", "game", "games",
+    ]
     for hobby in hobbies:
         if re.search(rf"\b{re.escape(hobby)}\b", low):
+            if hobby in {"game", "games"}:
+                return "gaming"
             return hobby
     return None
 
@@ -715,12 +728,20 @@ def detect_other_interest(text: str) -> Optional[str]:
 
 
 def detect_favorite_subject(text: str) -> Optional[str]:
-    low = (text or "").lower()
+    low = (text or "").lower().strip()
+
+    # do not treat language preference as school subject
+    blocked_language_phrases = [
+        "bengali", "bangla", "hindi", "tamil", "telugu", "hinglish",
+        "bengali-english", "bangla-english", "hindi-english",
+    ]
+    if any(x in low for x in blocked_language_phrases):
+        return None
+
     for label, keys in SUBJECT_KEYWORDS.items():
         if any(re.search(rf"\b{re.escape(k)}\b", low) for k in keys):
             return label.title()
     return None
-
 
 def normalize_topic_name(value: str) -> str:
     return re.sub(r"[^a-z_]", "", (value or "").lower().strip())
@@ -1224,9 +1245,10 @@ def build_mic_instruction(language: str) -> str:
 
     if language == "Bengali":
         return (
-            "Ekhon ami tomake chhoto kore mic-ta bujhiye di. "
-            "Intro chat-er somoy tumi jodi bolo, ami thambe aar tomake shunbo. "
-            "Kintu teaching start hole mic manual hoye jabe, tokhon screen-er niche majhkhaner mic button press kore kotha bolte hobe."
+            "Ami ekbar mic ta shohoj bhabe boli. "
+            "Intro chat er shomoy tumi jodi kotha bolo, ami sathe sathe thambe aar shunbo. "
+            "Kintu teaching shuru hole mic manual hoye jabe. "
+            "Tokhon screen er niche majhkhane je mic button ache, ota press kore kotha bolbe."
         )
     if language == "Hindi":
         return (
@@ -1257,7 +1279,6 @@ def build_mic_instruction(language: str) -> str:
         "Now let me explain the mic simply. During our intro chat, if you speak, I will stop and listen. "
         "Once teaching starts, the mic becomes manual, and then you need to press the mic button below in the center before speaking."
     )
-
 
 def build_mic_understanding_prompt(language: str) -> str:
     language = pretty_language(language or "English")
@@ -1349,79 +1370,112 @@ def next_intro_prompt(state: Dict[str, Any]) -> str:
     intro_memory = state.setdefault("intro_memory", {})
     topic_queue = intro_memory.setdefault("topic_queue", shuffled_intro_topics())
     asked_topics = set(intro_memory.setdefault("asked_topics", []))
+    memory = state.setdefault("student_memory", {})
+
+    def should_skip(topic: str) -> bool:
+        if topic == "language_check" and state.get("preferred_teaching_mode"):
+            return True
+        if topic == "favorite_food" and memory.get("favorite_food"):
+            return True
+        if topic == "favorite_sport" and memory.get("favorite_sport"):
+            return True
+        if topic == "favorite_hobby" and memory.get("favorite_hobby"):
+            return True
+        if topic == "favorite_subject" and memory.get("favorite_subject"):
+            return True
+        if topic == "other_interest" and memory.get("other_interest"):
+            return True
+        if topic == "who_loves_you_more" and memory.get("family_context", {}).get("who_loves_you_more"):
+            return True
+        return False
 
     while topic_queue:
         topic = normalize_topic_name(topic_queue.pop(0))
-        if topic not in asked_topics:
-            asked_topics.add(topic)
-            intro_memory["asked_topics"] = list(asked_topics)
-            intro_memory["last_topic"] = topic
+        if topic in asked_topics or should_skip(topic):
+            continue
 
-            if topic == "favorite_food":
-                return random.choice([
-                    "Now tell me, what food do you enjoy the most?",
-                    "Tell me one thing, which food makes you happiest?",
-                ])
-            if topic == "favorite_sport":
-                return random.choice([
-                    "And tell me one more thing, which sport or game do you enjoy the most?",
-                    "Which game or sport do you like playing the most?",
-                ])
-            if topic == "favorite_hobby":
-                return random.choice([
-                    "Apart from study, what hobby do you enjoy the most?",
-                    "Do you like drawing, singing, dancing, reading, or something else?",
-                ])
-            if topic == "who_loves_you_more":
-                return random.choice([
-                    "Tell me sweetly, who loves you the most at home?",
-                    "At home, who understands you the most with love?",
-                ])
-            if topic == "favorite_subject":
-                return random.choice([
-                    "Which is your favorite subject in school?",
-                    "Tell me, which subject feels the most fun to you?",
-                ])
-            if topic == "other_interest":
-                return random.choice([
-                    "Apart from study, what else do you enjoy thinking about?",
-                    "What other things do you like apart from school studies?",
-                ])
-            if topic == "language_check":
-                return random.choice([
-                    "And one more thing, which language feels easiest and warmest for you while learning?",
-                    "Tell me honestly, which language makes learning easiest for you?",
-                ])
+        asked_topics.add(topic)
+        intro_memory["asked_topics"] = list(asked_topics)
+        intro_memory["last_topic"] = topic
+
+        if topic == "favorite_food":
+            return random.choice([
+                "Now tell me, what food do you enjoy the most?",
+                "Tell me one thing, which food makes you happiest?",
+            ])
+        if topic == "favorite_sport":
+            return random.choice([
+                "And tell me one more thing, which sport or game do you enjoy the most?",
+                "Which game or sport do you like playing the most?",
+            ])
+        if topic == "favorite_hobby":
+            return random.choice([
+                "Apart from study, what hobby do you enjoy the most?",
+                "Do you like drawing, singing, dancing, reading, or something else?",
+            ])
+        if topic == "who_loves_you_more":
+            return random.choice([
+                "Tell me sweetly, who loves you the most at home?",
+                "At home, who understands you the most with love?",
+            ])
+        if topic == "favorite_subject":
+            return random.choice([
+                "Which is your favorite subject in school?",
+                "Tell me, which subject feels the most fun to you?",
+            ])
+        if topic == "other_interest":
+            return random.choice([
+                "Apart from study, what else do you enjoy thinking about?",
+                "What other things do you like apart from school studies?",
+            ])
+        if topic == "language_check":
+            return random.choice([
+                "And one more thing, which language feels easiest and warmest for you while learning?",
+                "Tell me honestly, which language makes learning easiest for you?",
+            ])
 
     intro_memory["topic_queue"] = shuffled_intro_topics()
     return "Tell me something more about what you enjoy in your daily life."
-
-
 def react_to_interest(state: Dict[str, Any], student_text: str) -> Optional[str]:
+    low = (student_text or "").lower().strip()
     memory = state.setdefault("student_memory", {})
-    low = (student_text or "").lower()
+    intro_memory = state.setdefault("intro_memory", {})
 
-    food = memory.get("favorite_food")
-    sport = memory.get("favorite_sport")
-    hobby = memory.get("favorite_hobby")
-    other_interest = memory.get("other_interest")
-    favorite_subject = memory.get("favorite_subject")
+    current_food = None
+    for food in FOOD_FACTS.keys():
+        if re.search(rf"\b{re.escape(food)}\b", low):
+            current_food = food
+            break
 
-    if food and not state.setdefault("intro_memory", {}).get("food_reacted_once"):
-        state["intro_memory"]["food_reacted_once"] = True
-        return f"Ah, {food} - that is such a lovely choice. {FOOD_FACTS.get(food, 'That sounds delicious.')}"
-    if sport and not state.setdefault("intro_memory", {}).get("sport_reacted_once"):
-        state["intro_memory"]["sport_reacted_once"] = True
-        return f"Very nice, {sport}. {SPORT_FACTS.get(sport, 'That sounds fun and energetic.')}"
-    if hobby and not state.setdefault("intro_memory", {}).get("hobby_reacted_once"):
-        state["intro_memory"]["hobby_reacted_once"] = True
-        return f"That is beautiful. {hobby.title()} suits you. {HOBBY_FACTS.get(hobby, '')}".strip()
-    if other_interest and not state.setdefault("intro_memory", {}).get("other_interest_reacted_once"):
-        state["intro_memory"]["other_interest_reacted_once"] = True
-        return f"Aha, so you also enjoy {other_interest}. That tells me more about your natural curiosity."
-    if favorite_subject and not state.setdefault("intro_memory", {}).get("subject_reacted_once"):
-        state["intro_memory"]["subject_reacted_once"] = True
-        return f"Very nice, {favorite_subject} is your favorite subject. That is lovely."
+    current_sport = None
+    for sport in SPORT_FACTS.keys():
+        if re.search(rf"\b{re.escape(sport)}\b", low):
+            current_sport = sport
+            break
+
+    current_hobby = detect_hobby(student_text)
+    current_interest = detect_other_interest(student_text)
+    current_subject = detect_favorite_subject(student_text)
+
+    if current_food and not intro_memory.get(f"reacted_food_{current_food}"):
+        intro_memory[f"reacted_food_{current_food}"] = True
+        return f"Ah, {current_food} - that is such a lovely choice. {FOOD_FACTS.get(current_food, 'That sounds delicious.')}"
+
+    if current_sport and not intro_memory.get(f"reacted_sport_{current_sport}"):
+        intro_memory[f"reacted_sport_{current_sport}"] = True
+        return f"Very nice, {current_sport}. {SPORT_FACTS.get(current_sport, 'That sounds fun and energetic.')}"
+
+    if current_hobby and not intro_memory.get(f"reacted_hobby_{current_hobby}"):
+        intro_memory[f"reacted_hobby_{current_hobby}"] = True
+        return f"That is beautiful. {current_hobby.title()} suits you. {HOBBY_FACTS.get(current_hobby, '')}".strip()
+
+    if current_interest and not intro_memory.get(f"reacted_interest_{current_interest}"):
+        intro_memory[f"reacted_interest_{current_interest}"] = True
+        return f"Aha, so you also enjoy {current_interest}. That tells me more about your natural curiosity."
+
+    if current_subject and not intro_memory.get(f"reacted_subject_{current_subject}"):
+        intro_memory[f"reacted_subject_{current_subject}"] = True
+        return f"Very nice, {current_subject} is your favorite subject. That is lovely."
 
     if "mother" in low or "mom" in low or "mummy" in low:
         return "That is very sweet. Mothers often understand us deeply."
@@ -1429,7 +1483,7 @@ def react_to_interest(state: Dict[str, Any], student_text: str) -> Optional[str]
         return "That is lovely. Fathers also show love in their own caring way."
     if "grandmother" in low or "grandma" in low or "dida" in low or "nani" in low:
         return "That is beautiful. Grandmothers bring so much warmth and love."
-    if "myself" in low or low.strip() == "me":
+    if low in {"myself", "me"}:
         return "Wonderful. That means you are learning to take care of yourself too."
 
     return None
@@ -1495,28 +1549,29 @@ def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject
     lines = [
         "Before we start the chapter, let me take you into a small real-life story.",
         f"Imagine one day after school, you come home and see your favorite {favorite_food} waiting for you.",
-        f"At the same time, your mind is still half inside {favorite_sport}, because that is something you really enjoy.",
-        f"Then someone like {who_loves} smiles at you, and the whole house suddenly feels warm and safe.",
-        f"You remember that food is often made with care by {cook_person}, and that makes ordinary life feel special.",
-        f"After a while, you sit quietly and think about {favorite_hobby}, {other_interest}, and the little things you naturally love.",
-        "Then your eyes go toward a green leaf outside the window, shining softly in sunlight.",
-        "And a beautiful question comes to your mind: we wait for food at home, but how does a plant prepare its own food?",
+        f"Your mind is still half inside {favorite_sport}, because that is something you really enjoy.",
+        f"Then someone like {who_loves} smiles at you, and the whole house feels warm and safe.",
+        f"You remember that food is often made with care by {cook_person}.",
+        f"After a while, you sit quietly and think about {favorite_hobby} and {other_interest}.",
+        "Then your eyes go toward a green leaf outside the window.",
+        "It is shining softly in sunlight.",
+        "And a beautiful question comes to your mind.",
+        "We wait for food at home, but how does a plant prepare its own food?",
         "That one question slowly opens the door to today’s chapter.",
-        f"So this chapter is not just about dry {subject}. It is about life, care, sunlight, food, and hidden intelligence.",
+        f"So this chapter is not just about dry {subject}.",
+        "It is about life, care, sunlight, food, and hidden intelligence.",
         "A leaf looks silent, but inside it, something magical is happening all the time.",
-        "The more we look at it, the more it starts feeling like a living kitchen, a breathing surface, and a quiet worker together.",
-        "That is why today we will not just read the chapter. We will feel it, imagine it, and then understand it properly.",
     ]
 
     if pref == "Bengali":
-        lines.insert(1, "Ektu bhebo toh, jiboner chhoto chhoto jinis thekei koto boro golpo beriye ashe.")
-        lines.append("Tai aaj amra sudhu chapter porbo na, golper moddhe diye bujhbo.")
+        lines.insert(1, "Ektu bhebo, jiboner chhoto chhoto jinisher moddheo onek boro golpo lukiye thake.")
+        lines.append("Tai aaj amra chapter ta golper moto kore bujhbo.")
     elif pref == "Hindi":
-        lines.insert(1, "Zara socho, zindagi ki chhoti chhoti cheezon ke andar kitni badi kahani chhupi hoti hai.")
+        lines.insert(1, "Zara socho, zindagi ki chhoti cheezon ke andar bhi kitni badi kahani chhupi hoti hai.")
         lines.append("Isiliye aaj hum chapter ko sirf padhenge nahi, mehsoos bhi karenge.")
     elif pref == "Hinglish":
         lines.insert(1, "Zara socho, daily life ki simple cheezon ke andar bhi kitni interesting story chhupi hoti hai.")
-        lines.append("So today hum chapter ko sirf book ki tarah nahi, real life ki story ki tarah samjhenge.")
+        lines.append("So today hum chapter ko real life story ki tarah samjhenge.")
 
     return lines
 
@@ -1612,6 +1667,8 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
     save_live_session(state)
     meta = meta or {}
     preferred_lang = preferred_explanation_style(state)
+    teacher_text = re.sub(r"\s+", " ", teacher_text).strip()
+    teacher_text = teacher_text.replace("  ", " ")
     meta["speech_text"] = speech_text(teacher_text, preferred_lang)
 
     return TurnResponse(
