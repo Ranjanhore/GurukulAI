@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import random
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Any, Dict, List
@@ -17,7 +18,7 @@ from openai import OpenAI
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="11.0")
+app = FastAPI(title="GurukulAI Backend", version="12.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -295,7 +296,9 @@ def title_case_name(name: str) -> str:
 
 
 def pretty_language(value: Optional[str]) -> str:
-    raw = (value or "Hinglish").strip()
+    raw = (value or "").strip()
+    if not raw:
+        return ""
     low = raw.lower()
     if "english" in low and "hindi" in low:
         return "Hinglish"
@@ -315,7 +318,7 @@ def pretty_language(value: Optional[str]) -> str:
         "odia": "Odia",
         "assamese": "Assamese",
     }
-    return mapping.get(low, raw or "Hinglish")
+    return mapping.get(low, raw)
 
 
 def sanitize_teacher_name(name: Optional[str]) -> str:
@@ -368,7 +371,7 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
         end = text.rfind("}")
         if start >= 0 and end > start:
             try:
-                return json.loads(text[start : end + 1])
+                return json.loads(text[start:end + 1])
             except Exception:
                 pass
     return {}
@@ -414,17 +417,23 @@ def speech_text(text: str, language: str = "English") -> str:
 # Detection Helpers
 # =========================================================
 def extract_student_name(text: str) -> Optional[str]:
-    clean = text.strip()
-    low = clean.lower()
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    if not clean:
+        return None
+
+    low = clean.lower().strip(" .,!?")
 
     blocked_words = {
         "english", "hindi", "hinglish", "bengali", "bangla", "tamil", "telugu",
         "marathi", "gujarati", "malayalam", "kannada", "punjabi", "odia", "assamese",
-        "yes", "no", "ok", "okay", "myself", "me", "mine", "food", "salad", "salads",
-        "rice", "dal", "mango", "apple", "banana", "cricket", "football", "badminton",
-        "basketball", "kitchen", "mother", "father", "mom", "dad", "grandmother",
-        "grandma", "my", "sex", "male", "female", "home", "house", "teacher", "student",
-        "game", "sport", "sports", "chapter", "subject", "biology",
+        "yes", "no", "ok", "okay", "myself", "me", "mine",
+        "food", "salad", "salads", "rice", "dal", "mango", "apple", "banana",
+        "cricket", "football", "badminton", "basketball", "kitchen",
+        "mother", "father", "mom", "dad", "grandmother", "grandma",
+        "my", "home", "house", "teacher", "student", "game", "sport", "sports",
+        "chapter", "subject", "biology", "science", "math", "maths",
+        "leaf", "photosynthesis", "chlorophyll", "stomata", "lamina",
+        "boy", "girl", "male", "female", "man", "woman",
     }
 
     patterns = [
@@ -433,33 +442,37 @@ def extract_student_name(text: str) -> Optional[str]:
         "i'm ",
         "name is ",
         "mera naam ",
+        "amar naam ",
     ]
 
     for pattern in patterns:
         if low.startswith(pattern):
             candidate = clean[len(pattern):].strip(" .,!?")
             candidate_low = candidate.lower()
-            if candidate and candidate_low not in blocked_words:
-                parts = candidate.split()
-                if 1 <= len(parts) <= 3 and all(part.isalpha() and 2 <= len(part) <= 20 for part in parts):
-                    return title_case_name(candidate)
+            parts = candidate.split()
+            if (
+                candidate
+                and candidate_low not in blocked_words
+                and 1 <= len(parts) <= 3
+                and all(part.isalpha() and 2 <= len(part) <= 20 for part in parts)
+            ):
+                return title_case_name(candidate)
 
     parts = clean.split()
-
-    # fallback only for real-looking multi-word names like "Ranjan Hore"
     if (
         2 <= len(parts) <= 3
-        and all(part.isalpha() and 2 <= len(part) <= 20 for part in parts)
         and low not in blocked_words
+        and all(part.isalpha() and 2 <= len(part) <= 20 for part in parts)
     ):
         return title_case_name(clean)
 
     return None
 
+
 def detect_food_fact(text: str) -> Optional[str]:
-    low = text.lower()
+    low = (text or "").lower()
     for food, fact in FOOD_FACTS.items():
-        if food in low:
+        if re.search(rf"\b{re.escape(food)}\b", low):
             return fact
     return None
 
@@ -473,7 +486,7 @@ def guess_language_from_name(full_name: str) -> Optional[str]:
 
 
 def detect_specific_language_name(text: str) -> Optional[str]:
-    low = text.lower()
+    low = (text or "").lower()
     language_map = {
         "english": "English",
         "hindi": "Hindi",
@@ -491,13 +504,13 @@ def detect_specific_language_name(text: str) -> Optional[str]:
         "assamese": "Assamese",
     }
     for key, value in language_map.items():
-        if key in low:
+        if re.search(rf"\b{re.escape(key)}\b", low):
             return value
     return None
 
 
 def detect_special_language_request(text: str) -> Optional[str]:
-    low = text.lower().strip()
+    low = (text or "").lower().strip()
     if "amra bangla te kotha bolte paari" in low or "bangla te kotha bolte pari" in low:
         return "Bengali"
     if "bangla te bolo" in low or "bangla bolo" in low:
@@ -516,7 +529,7 @@ def detect_special_language_request(text: str) -> Optional[str]:
 
 
 def detect_preferred_teaching_mode(text: str) -> Optional[str]:
-    low = text.lower()
+    low = (text or "").lower()
     if "hinglish" in low:
         return "Hinglish"
     if "english" in low and "hindi" in low:
@@ -551,7 +564,7 @@ def detect_preferred_teaching_mode(text: str) -> Optional[str]:
 
 
 def detect_low_english(text: str) -> bool:
-    low = text.lower().strip()
+    low = (text or "").lower().strip()
     weak_patterns = [
         "i goed",
         "he go",
@@ -567,7 +580,7 @@ def detect_low_english(text: str) -> bool:
 
 
 def detect_meaning_request(text: str) -> Optional[str]:
-    low = text.lower()
+    low = (text or "").lower()
     technical_words = ["photosynthesis", "chlorophyll", "stomata", "lamina"]
 
     asks_meaning = any(
@@ -590,6 +603,21 @@ def detect_meaning_request(text: str) -> Optional[str]:
         if word in low:
             return word
     return None
+
+
+def is_short_interest_reply(text: str) -> bool:
+    low = (text or "").lower().strip()
+    if not low:
+        return False
+    allowed = {
+        "mango", "banana", "apple", "rice", "dal", "egg", "milk", "curd", "roti",
+        "fish", "chicken", "idli", "dosa", "poha", "upma", "khichdi",
+        "cricket", "football", "badminton", "basketball", "minecraft", "free fire",
+        "roblox", "chess", "carrom", "ludo",
+        "mother", "father", "mom", "dad", "grandmother", "grandma", "myself", "me",
+        "english", "hindi", "hinglish", "bengali", "bangla", "tamil", "telugu",
+    }
+    return low in allowed
 
 
 # =========================================================
@@ -695,7 +723,7 @@ def upsert_student_brain_memory(state: Dict[str, Any]) -> None:
         "student_name": state.get("student_name"),
         "board": state.get("board"),
         "class_level": state.get("class_name"),
-        "preferred_language": memory.get("preferred_language") or state.get("language"),
+        "preferred_language": memory.get("preferred_language"),
         "strongest_language": memory.get("strongest_language"),
         "home_language": memory.get("home_language"),
         "favorite_food": memory.get("favorite_food"),
@@ -713,6 +741,7 @@ def upsert_student_brain_memory(state: Dict[str, Any]) -> None:
         "known_facts": memory.get("known_facts", {}),
         "family_context": memory.get("family_context", {}),
         "last_session_summary": memory.get("last_session_summary"),
+        "language_usage": memory.get("language_usage", {}),
     }
     try:
         existing = (
@@ -854,7 +883,7 @@ def update_language_usage(state: Dict[str, Any], text: str) -> None:
 
 
 def record_keywords(state: Dict[str, Any], text: str) -> None:
-    low = text.lower()
+    low = (text or "").lower()
     memory = state.setdefault("student_memory", {})
     known = memory.setdefault("known_facts", {})
     keywords = set(known.get("keywords", []))
@@ -865,16 +894,16 @@ def record_keywords(state: Dict[str, Any], text: str) -> None:
 
 
 def extract_interest_memory(student_text: str) -> Dict[str, Any]:
-    low = student_text.lower()
+    low = (student_text or "").lower()
     out: Dict[str, Any] = {}
 
     for food in FOOD_FACTS.keys():
-        if food in low:
+        if re.search(rf"\b{re.escape(food)}\b", low):
             out["favorite_food"] = food
             break
 
     for sport in ["cricket", "football", "badminton", "basketball", "tennis"]:
-        if sport in low:
+        if re.search(rf"\b{re.escape(sport)}\b", low):
             out["favorite_sport"] = sport
             break
 
@@ -887,11 +916,46 @@ def extract_interest_memory(student_text: str) -> Dict[str, Any]:
     if lang:
         out["preferred_language"] = lang
 
+    if any(x in low for x in ["mother", "mom", "mummy"]):
+        out.setdefault("family_context", {})["who_cooks"] = "your mother"
+    elif any(x in low for x in ["father", "dad", "papa"]):
+        out.setdefault("family_context", {})["who_cooks"] = "your father"
+    elif any(x in low for x in ["grandmother", "grandma", "dida", "nani"]):
+        out.setdefault("family_context", {})["who_cooks"] = "your grandmother"
+    elif low in {"myself", "me"}:
+        out.setdefault("family_context", {})["who_cooks"] = "you"
+
     return out
 
 
+def merge_student_memory(state: Dict[str, Any], new_bits: Dict[str, Any]) -> None:
+    if not new_bits:
+        return
+    memory = state.setdefault("student_memory", {})
+
+    for key, value in new_bits.items():
+        if value is None:
+            continue
+
+        if isinstance(value, dict):
+            bucket = memory.setdefault(key, {})
+            for sub_key, sub_value in value.items():
+                if sub_value not in [None, "", [], {}]:
+                    bucket[sub_key] = sub_value
+        elif isinstance(value, list):
+            existing = memory.setdefault(key, [])
+            merged = list(dict.fromkeys(existing + value))
+            memory[key] = merged
+        else:
+            if value not in ["", None]:
+                memory[key] = value
+
+    if memory.get("preferred_language") and not state.get("preferred_teaching_mode"):
+        state["preferred_teaching_mode"] = memory.get("preferred_language")
+
+
 def teacher_personal_answer(state: Dict[str, Any], student_text: str) -> Optional[str]:
-    low = student_text.lower()
+    low = (student_text or "").lower()
     persona = state.get("teacher_persona", {})
     family = persona.get("family_profile", {})
     hobbies = persona.get("hobby_profile", {})
@@ -926,6 +990,7 @@ def explain_technical_word_meaning(word: str, language: str) -> Optional[str]:
             "Tamil": "photosynthesis na plant sunlight, water, carbon dioxide use panni thanoda food ready pannudhu.",
             "Telugu": "photosynthesis ante plant sunlight, water, carbon dioxide use chesi tana food tayaru chesukuntundi.",
             "English": "photosynthesis means a plant makes its own food using sunlight, water, and carbon dioxide.",
+            "Hinglish": "photosynthesis means plant sunlight, water aur carbon dioxide use karke apna food banata hai.",
         },
         "chlorophyll": {
             "Hindi": "chlorophyll leaf ka green pigment hai jo sunlight absorb karta hai.",
@@ -933,6 +998,7 @@ def explain_technical_word_meaning(word: str, language: str) -> Optional[str]:
             "Tamil": "chlorophyll leaf-oda green pigment, sunlight absorb pannudhu.",
             "Telugu": "chlorophyll ante leaf lo unna green pigment, sunlight absorb chestundi.",
             "English": "chlorophyll is the green pigment in leaves that absorbs sunlight.",
+            "Hinglish": "chlorophyll leaf ka green pigment hai jo sunlight absorb karta hai.",
         },
         "stomata": {
             "Hindi": "stomata leaf ke chhote openings hote hain jo gaseous exchange mein help karte hain.",
@@ -940,6 +1006,7 @@ def explain_technical_word_meaning(word: str, language: str) -> Optional[str]:
             "Tamil": "stomata na leaf la irukkara chinna openings, gas exchange-ku help pannum.",
             "Telugu": "stomata ante leaf meeda unna chinna openings, gas exchange lo help chestayi.",
             "English": "stomata are tiny openings on leaves that help in gas exchange.",
+            "Hinglish": "stomata leaf ke tiny openings hote hain jo gas exchange mein help karte hain.",
         },
         "lamina": {
             "Hindi": "lamina leaf ka broad flat hissa hota hai.",
@@ -947,11 +1014,40 @@ def explain_technical_word_meaning(word: str, language: str) -> Optional[str]:
             "Tamil": "lamina na leaf-oda broad flat part.",
             "Telugu": "lamina ante leaf yokka broad flat part.",
             "English": "lamina is the broad flat part of a leaf.",
+            "Hinglish": "lamina leaf ka broad flat part hota hai.",
         },
     }
 
     if key in meanings:
         return meanings[key].get(language) or meanings[key].get("English")
+    return None
+
+
+def maybe_gentle_language_model(state: Dict[str, Any], text: str) -> Optional[str]:
+    low = (text or "").lower().strip()
+    pref = preferred_explanation_style(state)
+
+    corrections = {
+        "i goed": "You can say, I went. Very good try. Now let us continue.",
+        "he go": "You can say, he goes. Nice try. Now let us continue.",
+        "she go": "You can say, she goes. Good effort. Now let us continue.",
+        "i no understand": "You can say, I do not understand. That is absolutely okay. Let me explain simply.",
+        "i not know": "You can say, I do not know. That is okay. We will learn it together.",
+        "me like": "You can say, I like. Nice try.",
+    }
+
+    for wrong, correction in corrections.items():
+        if wrong in low:
+            level = int(state.setdefault("student_memory", {}).get("english_correction_level", 0))
+            if level < 3:
+                state["student_memory"]["english_correction_level"] = level + 1
+                if pref == "Bengali":
+                    return correction + " Bangla mix koreo bujhiye dichhi."
+                if pref == "Hindi" or pref == "Hinglish":
+                    return correction + " Main simple way mein samjhaati hoon."
+                return correction
+            break
+
     return None
 
 
@@ -963,8 +1059,9 @@ def preferred_explanation_style(state: Dict[str, Any]) -> str:
         state.get("preferred_teaching_mode")
         or state.get("student_memory", {}).get("preferred_language")
         or state.get("language")
+        or "English"
     )
-    return pretty_language(pref)
+    return pretty_language(pref) or "English"
 
 
 def mix_line_for_language(language: str, key: str) -> str:
@@ -982,7 +1079,7 @@ def react_to_name(name: str) -> str:
 
 
 def build_reactive_intro_reply(state: Dict[str, Any], student_text: str) -> str:
-    low = student_text.lower().strip()
+    low = (student_text or "").lower().strip()
 
     if detect_food_fact(student_text):
         food_fact = detect_food_fact(student_text)
@@ -1102,7 +1199,12 @@ def intro_is_ready_to_transition(state: Dict[str, Any]) -> bool:
     turns = int(intro.get("intro_turn_count", 0))
     has_name = bool(state.get("student_name"))
     has_lang = bool(state.get("preferred_teaching_mode"))
-    return (turns >= 8 and has_name and has_lang) or intro.get("ready_to_start") is True
+    enough_personal_context = bool(
+        state.get("student_memory", {}).get("favorite_food")
+        or state.get("student_memory", {}).get("favorite_sport")
+        or state.get("student_memory", {}).get("family_context", {}).get("who_cooks")
+    )
+    return (turns >= 5 and has_name and has_lang and enough_personal_context) or intro.get("ready_to_start") is True
 
 
 def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject: str) -> List[str]:
@@ -1130,7 +1232,7 @@ def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject
 
     if pref == "Bengali":
         lines.insert(1, "Ektu bhabo toh, ei chhoto jinishtar modhyeo koto boro golpo lukiye thakte pare.")
-    elif pref == "Hindi":
+    elif pref == "Hindi" or pref == "Hinglish":
         lines.insert(1, "Zara socho, kitni simple si cheez ke andar kitni badi kahani chhupi ho sakti hai.")
 
     return lines
@@ -1199,13 +1301,14 @@ def build_teach_system_prompt(context: Dict[str, Any]) -> str:
 You are GurukulAI Teacher in guided teaching mode.
 
 Rules:
-- Stay grounded in the current chunk.
-- Default to mixed language if preferred_teaching_mode is not English.
-- Keep technical words in English.
-- If student is weak in English, explain in mixed English + Hindi or regional support.
-- If student says incorrect English, gently correct once, then continue kindly.
-- Keep answers concise, warm, and personal.
-- If the question is irrelevant, redirect gently.
+- Stay grounded in the current chapter context.
+- If preferred_teaching_mode is not English, explain naturally in mixed style.
+- Keep technical terms in English only.
+- Use regional-language support naturally when needed.
+- Be warm, short, and personal.
+- If student asks meaning of a technical word, explain in preferred language but keep the word itself in English.
+- If student gives a weak English sentence, gently correct once, then continue kindly.
+- If the question is off-track, redirect gently.
 
 Return only JSON:
 {{
@@ -1233,7 +1336,6 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     update_language_usage(state, student_text)
     record_keywords(state, student_text)
 
-    # only accept explicit student_name if it is a plausible real name
     if req.student_name and req.student_name.strip() and not state.get("student_name"):
         parsed_req_name = extract_student_name(req.student_name.strip())
         if parsed_req_name:
@@ -1275,7 +1377,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
 
         stored_pref = state.get("student_memory", {}).get("preferred_language")
         if stored_pref:
-            message_parts.append(f"I already remember that {stored_pref} feels comfortable for you.")
+            message_parts.append(f"I remember that {stored_pref} feels comfortable for you.")
             message_parts.append(intro_followup_after_reaction(state, student_text))
         else:
             if guessed == "Bengali":
@@ -1317,16 +1419,6 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
 
     merge_student_memory(state, extract_interest_memory(student_text))
 
-    low = student_text.lower()
-    if "mother" in low or "mom" in low or "mummy" in low:
-        state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your mother"
-    elif "father" in low or "dad" in low or "papa" in low:
-        state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your father"
-    elif "grandmother" in low or "grandma" in low or "dida" in low or "nani" in low:
-        state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "your grandmother"
-    elif "myself" in low or low == "me":
-        state.setdefault("student_memory", {}).setdefault("family_context", {})["who_cooks"] = "you"
-
     favorite_food = state.get("student_memory", {}).get("favorite_food")
     intro_memory = state.setdefault("intro_memory", {})
     if favorite_food and not intro_memory.get("favorite_food_reacted"):
@@ -1339,6 +1431,11 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             False,
         )
 
+    if is_short_interest_reply(student_text):
+        reaction = build_intro_reaction_then_followup(state, student_text)
+        followup = intro_followup_after_reaction(state, student_text)
+        return make_turn(state, f"{reaction} {followup}".strip(), True, False)
+
     if not state.get("student_name"):
         return make_turn(state, "Tell me your full name once nicely.", True, False)
 
@@ -1350,7 +1447,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             False,
         )
 
-    if intro["intro_turn_count"] < 6:
+    if intro["intro_turn_count"] < 5:
         return make_turn(state, intro_followup_after_reaction(state, student_text), True, False)
 
     if intro_is_ready_to_transition(state):
@@ -1386,6 +1483,28 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
     if correction:
         return make_turn(state, correction, True, False, {"teach_action": "english_correction"})
 
+    low = (text or "").lower().strip()
+
+    if mode == "story":
+        if any(x in low for x in ["yes", "haan", "ha", "hmm", "yes it makes sense", "understood", "bujhlam", "samajh gaya", "samajh gayi"]):
+            state["phase"] = "TEACH"
+            return make_turn(
+                state,
+                "Wonderful. Then let us start the actual teaching now.",
+                False,
+                False,
+                {"resume_phase": "TEACH"},
+            )
+
+        if any(x in low for x in ["no", "not clear", "did not understand", "dont understand", "don't understand", "confused"]):
+            return make_turn(
+                state,
+                "No problem at all. The simple idea is this: just like food comes to us through care and preparation, a plant also prepares its own food through the leaf. Now let us go step by step.",
+                False,
+                False,
+                {"resume_phase": "TEACH"},
+            )
+
     pref = preferred_explanation_style(state)
     context = {
         "teacher_name": state.get("teacher_name"),
@@ -1398,22 +1517,30 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
         "preferred_teaching_mode": pref,
         "student_memory": state.get("student_memory", {}),
         "student_text": text,
+        "mode": mode,
     }
 
     result = call_openai_json(build_teach_system_prompt(context), context)
     if result and result.get("teacher_text"):
-        return make_turn(state, result["teacher_text"], False, False, {"teach_action": result.get("action", "continue")})
+        meta = {"teach_action": result.get("action", "continue")}
+        awaiting_user = True if result.get("action") in {"recap", "check_understanding"} else False
+        return make_turn(state, result["teacher_text"], awaiting_user, False, meta)
 
-    if "photosynthesis" in text.lower():
+    if "photosynthesis" in low:
         if pref == "English":
             msg = "Photosynthesis is the process by which plants make their own food using sunlight, water, and carbon dioxide."
         elif pref == "Bengali":
             msg = "Photosynthesis mane gachh surjer alo, jol aar carbon dioxide use kore nijer khabar toiri kore."
-        else:
+        elif pref == "Hindi" or pref == "Hinglish":
             msg = "Photosynthesis means plants make their own food using sunlight, water, and carbon dioxide. Simple language mein, plant apna khana khud banata hai."
-        return make_turn(state, msg, False, False)
+        else:
+            msg = "Photosynthesis means a plant makes its own food using sunlight, water, and carbon dioxide."
+        return make_turn(state, msg, True, False)
 
-    return make_turn(state, "Good question. Let us continue together.", False, False)
+    if mode == "teach":
+        return make_turn(state, "Good question. Let us continue together.", False, False, {"resume_phase": "TEACH"})
+
+    return make_turn(state, "Good question. Let us continue.", False, False)
 
 
 def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
@@ -1549,7 +1676,8 @@ def start_session(req: SessionStartRequest):
     class_name = normalize_class_name(req.class_name or req.class_level)
     subject = (req.subject or "").strip()
     chapter_title = (req.chapter or req.chapter_title or "").strip()
-    language = pretty_language(req.preferred_language or req.language or "Hinglish")
+
+    raw_language = pretty_language(req.preferred_language or req.language or "")
     student_name = title_case_name(req.student_name.strip()) if (req.student_name or "").strip() else ""
 
     if not board:
@@ -1571,7 +1699,31 @@ def start_session(req: SessionStartRequest):
     session_id = str(uuid.uuid4())
     existing_student_memory = load_student_brain_memory(student_name, board, class_name) if student_name else {}
 
-    stored_pref = existing_student_memory.get("preferred_language") or language
+    remembered_pref = pretty_language(existing_student_memory.get("preferred_language") or "")
+    request_pref = pretty_language(raw_language or "")
+
+    preferred_from_memory = remembered_pref if remembered_pref else None
+
+    student_memory: Dict[str, Any] = {
+        "preferred_language": preferred_from_memory,
+        "strongest_language": existing_student_memory.get("strongest_language") or preferred_from_memory,
+        "home_language": existing_student_memory.get("home_language"),
+        "favorite_food": existing_student_memory.get("favorite_food"),
+        "favorite_game": existing_student_memory.get("favorite_game"),
+        "favorite_sport": existing_student_memory.get("favorite_sport"),
+        "favorite_cartoon": existing_student_memory.get("favorite_cartoon"),
+        "chapter_likes": existing_student_memory.get("chapter_likes", []),
+        "chapter_dislikes": existing_student_memory.get("chapter_dislikes", []),
+        "communication_improvement_score": existing_student_memory.get("communication_improvement_score", 0),
+        "english_correction_level": existing_student_memory.get("english_correction_level"),
+        "english_improvement_score": existing_student_memory.get("english_improvement_score", 0),
+        "regional_language_improvement_score": existing_student_memory.get("regional_language_improvement_score", 0),
+        "attention_score": existing_student_memory.get("attention_score", 0),
+        "participation_score": existing_student_memory.get("participation_score", 0),
+        "family_context": existing_student_memory.get("family_context", {}),
+        "known_facts": existing_student_memory.get("known_facts", {}),
+        "language_usage": existing_student_memory.get("language_usage", {}),
+    }
 
     state: Dict[str, Any] = {
         "session_id": session_id,
@@ -1586,28 +1738,9 @@ def start_session(req: SessionStartRequest):
         "chapter": chapter_title,
         "part_no": int(req.part_no or 1),
         "student_name": student_name,
-        "language": language,
-        "preferred_teaching_mode": existing_student_memory.get("preferred_language"),
-        "student_memory": {
-            "preferred_language": stored_pref,
-            "strongest_language": existing_student_memory.get("strongest_language") or stored_pref,
-            "home_language": existing_student_memory.get("home_language"),
-            "favorite_food": existing_student_memory.get("favorite_food"),
-            "favorite_game": existing_student_memory.get("favorite_game"),
-            "favorite_sport": existing_student_memory.get("favorite_sport"),
-            "favorite_cartoon": existing_student_memory.get("favorite_cartoon"),
-            "chapter_likes": existing_student_memory.get("chapter_likes", []),
-            "chapter_dislikes": existing_student_memory.get("chapter_dislikes", []),
-            "communication_improvement_score": existing_student_memory.get("communication_improvement_score", 0),
-            "english_correction_level": existing_student_memory.get("english_correction_level"),
-            "english_improvement_score": existing_student_memory.get("english_improvement_score", 0),
-            "regional_language_improvement_score": existing_student_memory.get("regional_language_improvement_score", 0),
-            "attention_score": existing_student_memory.get("attention_score", 0),
-            "participation_score": existing_student_memory.get("participation_score", 0),
-            "family_context": existing_student_memory.get("family_context", {}),
-            "known_facts": existing_student_memory.get("known_facts", {}),
-            "language_usage": existing_student_memory.get("language_usage", {}),
-        },
+        "language": request_pref or "English",
+        "preferred_teaching_mode": preferred_from_memory,
+        "student_memory": student_memory,
         "phase": "INTRO",
         "intro_profile": {
             "intro_turn_count": 0,
@@ -1640,7 +1773,9 @@ def start_session(req: SessionStartRequest):
 
     SESSIONS[session_id] = state
     save_live_session(state)
-    upsert_student_brain_memory(state)
+
+    if state.get("student_name"):
+        upsert_student_brain_memory(state)
 
     return {
         "ok": True,
@@ -1676,7 +1811,6 @@ def respond(req: RespondRequest):
     if req.teacher_name and req.teacher_name.strip():
         state["teacher_name"] = sanitize_teacher_name(req.teacher_name.strip())
 
-    # do NOT blindly trust frontend student_name
     if req.student_name and req.student_name.strip() and not state.get("student_name"):
         parsed_req_name = extract_student_name(req.student_name.strip())
         if parsed_req_name:
@@ -1684,7 +1818,7 @@ def respond(req: RespondRequest):
 
     incoming_language = req.preferred_language or req.language
     if incoming_language and incoming_language.strip():
-        state["language"] = pretty_language(incoming_language.strip())
+        state["language"] = pretty_language(incoming_language.strip()) or state.get("language") or "English"
 
     text = (req.text or "").strip()
     if not text:
