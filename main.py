@@ -1271,15 +1271,29 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
                 False,
             )
 
-    interest_reaction = react_to_interest(state, student_text)
-    if interest_reaction:
-        next_prompt = next_intro_prompt(state)
+interest_reaction = react_to_interest(state, student_text)
+if interest_reaction:
+    next_prompt = next_intro_prompt(state)
 
-        if next_prompt:
-            return make_turn(state, f"{interest_reaction} {next_prompt}", True, False)
+    if next_prompt:
+        return make_turn(state, f"{interest_reaction} {next_prompt}", True, False)
 
-        pref = preferred_explanation_style(state)
-        state["phase"] = "STORY"
+    pref = preferred_explanation_style(state)
+    state["phase"] = "STORY"
+
+    if not state.get("story_chunks"):
+        state["story_chunks"] = build_story_from_student_memory(
+            state,
+            state.get("chapter", ""),
+            state.get("subject", ""),
+        )
+
+    preface = (
+        f"{interest_reaction} "
+        f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
+        "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
+    )
+    return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
 
         if not state.get("story_chunks"):
             state["story_chunks"] = build_story_from_student_memory(
@@ -1390,17 +1404,23 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
         if idx < len(chunks):
             state["intro_index"] = idx + 1
             return make_turn(state, chunks[idx], True, False, {"intro_index": idx})
-        return make_turn(state, "Tell me your full name once nicely.", True, False, {"intro_index": idx})
+        return make_turn(
+            state,
+            "Tell me your full name once nicely.",
+            True,
+            False,
+            {"intro_index": idx},
+        )
 
-  if phase == "STORY":
-    idx = int(state.get("story_index", 0))
-    chunks = state.get("story_chunks", [])
-    if idx < len(chunks):
-        state["story_index"] = idx + 1
-        return make_turn(state, chunks[idx], False, False, {"story_index": idx})
+    if phase == "STORY":
+        idx = int(state.get("story_index", 0))
+        chunks = state.get("story_chunks", [])
+        if idx < len(chunks):
+            state["story_index"] = idx + 1
+            return make_turn(state, chunks[idx], False, False, {"story_index": idx})
 
-    state["phase"] = "TEACH"
-    return serve_next_auto_turn(state)
+        state["phase"] = "TEACH"
+        return serve_next_auto_turn(state)
 
     if phase == "TEACH":
         idx = int(state.get("teach_index", 0))
@@ -1410,6 +1430,7 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
             awaiting = idx == len(chunks) - 1
             state["xp"] = int(state.get("xp", 0)) + 5
             return make_turn(state, chunks[idx], awaiting, False, {"teach_index": idx})
+
         state["phase"] = "QUIZ"
         return serve_next_auto_turn(state)
 
@@ -1417,16 +1438,33 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
         idx = int(state.get("quiz_index", 0))
         questions = state.get("quiz_questions", [])
         if idx < len(questions):
-            return make_turn(state, f"Quiz time. {questions[idx]['question']}", True, False, {"quiz_index": idx})
+            return make_turn(
+                state,
+                f"Quiz time. {questions[idx]['question']}",
+                True,
+                False,
+                {"quiz_index": idx},
+            )
+
         state["phase"] = "HOMEWORK"
         return serve_next_auto_turn(state)
 
     if phase == "HOMEWORK":
         items = state.get("homework_items", [])
         state["phase"] = "DONE"
-        return make_turn(state, "Great work today. Your homework is: " + " ".join(items), False, True)
+        return make_turn(
+            state,
+            "Great work today. Your homework is: " + " ".join(items),
+            False,
+            True,
+        )
 
-    return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", False, True)
+    return make_turn(
+        state,
+        "This session is complete. Press Start Class to begin a new lesson.",
+        False,
+        True,
+    )
 
 
 # =========================================================
