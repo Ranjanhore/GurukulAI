@@ -18,7 +18,7 @@ from openai import OpenAI
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="13.5")
+app = FastAPI(title="GurukulAI Backend", version="13.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -207,6 +207,7 @@ PRONUNCIATION_MAP_ENGLISH = {
     "Tamil": "Ta-mil",
     "Telugu": "Te-lu-gu",
 }
+
 PRONUNCIATION_MAP_BENGALI = {
     "amra": "am-ra",
     "Bangla": "Baang-la",
@@ -1011,7 +1012,6 @@ def load_chapter_module_from_db(board: str, class_name: str, subject: str, chapt
             .limit(1)
             .execute()
         )
-
         chapter_item = first_or_none(chapter_row.data)
         if not chapter_item:
             return None
@@ -1027,7 +1027,6 @@ def load_chapter_module_from_db(board: str, class_name: str, subject: str, chapt
             .limit(1)
             .execute()
         )
-
         part_item = first_or_none(part_row.data)
         if not part_item:
             return None
@@ -1059,7 +1058,6 @@ def load_chapter_module_from_db(board: str, class_name: str, subject: str, chapt
                 for q in (quiz_row.data or [])
             ],
         }
-
     except Exception as e:
         print("DB chapter load failed:", repr(e))
         return None
@@ -1130,8 +1128,9 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
             "badges": list(state.get("badges", [])),
             "quiz_total": int(state.get("quiz_total", 0)),
             "quiz_correct": int(state.get("quiz_correct", 0)),
-            "percentage": int((int(state.get("quiz_correct", 0)) / max(1, int(state.get("quiz_total", 0)))) * 100)
-            if int(state.get("quiz_total", 0)) > 0 else 0,
+            "percentage": int(
+                (int(state.get("quiz_correct", 0)) / max(1, int(state.get("quiz_total", 0)))) * 100
+            ) if int(state.get("quiz_total", 0)) > 0 else 0,
         },
     )
 
@@ -1271,29 +1270,15 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
                 False,
             )
 
-interest_reaction = react_to_interest(state, student_text)
-if interest_reaction:
-    next_prompt = next_intro_prompt(state)
+    interest_reaction = react_to_interest(state, student_text)
+    if interest_reaction:
+        next_prompt = next_intro_prompt(state)
 
-    if next_prompt:
-        return make_turn(state, f"{interest_reaction} {next_prompt}", True, False)
+        if next_prompt:
+            return make_turn(state, f"{interest_reaction} {next_prompt}", True, False)
 
-    pref = preferred_explanation_style(state)
-    state["phase"] = "STORY"
-
-    if not state.get("story_chunks"):
-        state["story_chunks"] = build_story_from_student_memory(
-            state,
-            state.get("chapter", ""),
-            state.get("subject", ""),
-        )
-
-    preface = (
-        f"{interest_reaction} "
-        f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
-        "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
-    )
-    return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
+        pref = preferred_explanation_style(state)
+        state["phase"] = "STORY"
 
         if not state.get("story_chunks"):
             state["story_chunks"] = build_story_from_student_memory(
@@ -1353,11 +1338,23 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
     if mode == "story":
         if any(x in low for x in ["yes", "haan", "ha", "hmm", "understood", "bujhlam", "samajh gaya", "samajh gayi"]):
             state["phase"] = "TEACH"
-            return make_turn(state, "Wonderful. Now the story is sitting in your mind, so let us begin the actual teaching gently.", False, False, {"resume_phase": "TEACH"})
+            return make_turn(
+                state,
+                "Wonderful. Now the story is sitting in your mind, so let us begin the actual teaching gently.",
+                False,
+                False,
+                {"resume_phase": "TEACH"},
+            )
 
         if any(x in low for x in ["no", "not clear", "did not understand", "dont understand", "don't understand", "confused"]):
             state["phase"] = "TEACH"
-            return make_turn(state, "No problem at all. The simple idea is this: just like our home gives us care and food, a plant also quietly prepares its own food through the leaf. Now let us go step by step into the chapter.", False, False, {"resume_phase": "TEACH"})
+            return make_turn(
+                state,
+                "No problem at all. The simple idea is this: just like our home gives us care and food, a plant also quietly prepares its own food through the leaf. Now let us go step by step into the chapter.",
+                False,
+                False,
+                {"resume_phase": "TEACH"},
+            )
 
     return make_turn(state, "Good question. Let us continue together.", False, False, {"resume_phase": "TEACH"})
 
@@ -1374,7 +1371,15 @@ def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
     student = (text or "").lower().strip()
     state["quiz_total"] = len(questions)
 
+    accepted_answers = [str(a).lower().strip() for a in q.get("accepted_answers", []) if str(a).strip()]
+    is_correct = False
+
     if answer and answer in student:
+        is_correct = True
+    elif accepted_answers:
+        is_correct = any(a in student for a in accepted_answers)
+
+    if is_correct:
         state["quiz_correct"] = int(state.get("quiz_correct", 0)) + 1
         state["score"] = int(state.get("score", 0)) + 10
         state["xp"] = int(state.get("xp", 0)) + 10
@@ -1384,7 +1389,12 @@ def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
 
     state["quiz_index"] = idx + 1
     if state["quiz_index"] < len(questions):
-        return make_turn(state, f"{feedback} Next question: {questions[state['quiz_index']]['question']}", True, False)
+        return make_turn(
+            state,
+            f"{feedback} Next question: {questions[state['quiz_index']]['question']}",
+            True,
+            False,
+        )
 
     state["phase"] = "HOMEWORK"
     return make_turn(state, feedback + " Quiz complete.", False, False)
@@ -1392,7 +1402,12 @@ def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
 
 def answer_during_homework(state: Dict[str, Any], text: str) -> TurnResponse:
     state["phase"] = "DONE"
-    return make_turn(state, "Wonderful. We are done for today. Revise the chapter once and complete the homework.", False, True)
+    return make_turn(
+        state,
+        "Wonderful. We are done for today. Revise the chapter once and complete the homework.",
+        False,
+        True,
+    )
 
 
 def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
