@@ -18,7 +18,7 @@ from openai import OpenAI
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="13.4")
+app = FastAPI(title="GurukulAI Backend", version="13.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -266,6 +266,7 @@ class TurnResponse(BaseModel):
     meta: Optional[Dict[str, Any]] = None
     report: Optional[Dict[str, Any]] = None
 
+
 # =========================================================
 # Basic Helpers
 # =========================================================
@@ -349,6 +350,7 @@ def clean_student_reply(text: str) -> str:
     value = re.sub(r"\s+", " ", (text or "").strip(" .,!?\n\t"))
     return value[:60]
 
+
 # =========================================================
 # Pronunciation / Speech Helpers
 # =========================================================
@@ -368,6 +370,7 @@ def build_speech_text(text: str, language: str) -> str:
 
 def speech_text(text: str, language: str = "English") -> str:
     return build_speech_text(text, language)
+
 
 # =========================================================
 # Detection Helpers
@@ -492,6 +495,7 @@ def shuffled_intro_topics() -> List[str]:
     random.shuffle(topics)
     return topics
 
+
 # =========================================================
 # Storage Helpers
 # =========================================================
@@ -560,6 +564,7 @@ def pick_teacher_from_db(board: str, class_name: str, subject: str, requested_na
         "teacher_code": requested_code,
         "voice_id": ELEVENLABS_VOICE_ID or None,
     }
+
 
 # =========================================================
 # State / Memory Helpers
@@ -949,6 +954,7 @@ def react_to_interest(state: Dict[str, Any], student_text: str) -> Optional[str]
 
     return None
 
+
 # =========================================================
 # Story / Lesson
 # =========================================================
@@ -988,6 +994,8 @@ def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject
         lines.append("Aaj hum chapter ko real life story ke through samjhenge.")
 
     return lines
+
+
 def load_chapter_module_from_db(board: str, class_name: str, subject: str, chapter: str, part_no: int = 1) -> Optional[Dict[str, Any]]:
     if not supabase:
         return None
@@ -1056,6 +1064,7 @@ def load_chapter_module_from_db(board: str, class_name: str, subject: str, chapt
         print("DB chapter load failed:", repr(e))
         return None
 
+
 def generate_lesson_content(board: str, class_name: str, subject: str, chapter: str, teacher_name: str, part_no: int = 1) -> Dict[str, Any]:
     greeting = current_greeting()
 
@@ -1073,13 +1082,10 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
             "recap_chunks": db_module.get("recap_chunks", []),
         }
 
-    # fallback if DB has no content
     return {
         "intro_chunks": [f"{greeting}! I am {teacher_name}. First tell me your full name once nicely."],
         "story_chunks": [],
-        "teach_chunks": [
-            "Let us begin the chapter step by step."
-        ],
+        "teach_chunks": ["Let us begin the chapter step by step."],
         "quiz_questions": [],
         "homework_items": [],
         "part_title": "",
@@ -1087,6 +1093,7 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
         "learning_goals": [],
         "recap_chunks": [],
     }
+
 
 # =========================================================
 # Turn Helper
@@ -1127,6 +1134,7 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
             if int(state.get("quiz_total", 0)) > 0 else 0,
         },
     )
+
 
 # =========================================================
 # Flow Logic
@@ -1268,46 +1276,27 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
         next_prompt = next_intro_prompt(state)
 
         if next_prompt:
-            # key fix:
-            # do NOT wait for random extra student reply if a next prompt exists
             return make_turn(state, f"{interest_reaction} {next_prompt}", True, False)
 
         if intro_is_ready_to_transition(state):
-          pref = preferred_explanation_style(state)
-state["phase"] = "STORY"
-state["story_chunks"] = build_story_from_student_memory(
-    state,
-    state.get("chapter", ""),
-    state.get("subject", ""),
-)
+            pref = preferred_explanation_style(state)
+            state["phase"] = "STORY"
 
-preface = (
-    f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
-    "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
-)
+            if not state.get("story_chunks"):
+                state["story_chunks"] = build_story_from_student_memory(
+                    state,
+                    state.get("chapter", ""),
+                    state.get("subject", ""),
+                )
 
-return make_turn(
-    state,
-    preface,
-    False,
-    False,
-    {"resume_phase": "STORY"}
-)
+            preface = (
+                f"{interest_reaction} "
+                f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
+                "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
+            )
+            return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
 
-        # if no next prompt, push story automatically instead of stopping
-        pref = preferred_explanation_style(state)
-        state["phase"] = "STORY"
-        state["story_chunks"] = build_story_from_student_memory(
-            state,
-            state.get("chapter", ""),
-            state.get("subject", ""),
-        )
-        preface = (
-            f"{interest_reaction} "
-            f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
-            "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
-        )
-        return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
+        return make_turn(state, interest_reaction, True, False)
 
     if is_short_interest_reply(student_text):
         next_prompt = next_intro_prompt(state)
@@ -1332,11 +1321,13 @@ return make_turn(
 
     pref = preferred_explanation_style(state)
     state["phase"] = "STORY"
-    state["story_chunks"] = build_story_from_student_memory(
-        state,
-        state.get("chapter", ""),
-        state.get("subject", ""),
-    )
+
+    if not state.get("story_chunks"):
+        state["story_chunks"] = build_story_from_student_memory(
+            state,
+            state.get("chapter", ""),
+            state.get("subject", ""),
+        )
 
     preface = (
         f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
@@ -1409,9 +1400,8 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
         chunks = state.get("story_chunks", [])
         if idx < len(chunks):
             state["story_index"] = idx + 1
-            if idx == len(chunks) - 1:
-                return make_turn(state, chunks[idx] + " Before I begin the actual teaching, tell me - does this little story make sense to you so far?", True, False, {"story_index": idx})
             return make_turn(state, chunks[idx], False, False, {"story_index": idx})
+
         state["phase"] = "TEACH"
         return serve_next_auto_turn(state)
 
@@ -1440,6 +1430,7 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
         return make_turn(state, "Great work today. Your homework is: " + " ".join(items), False, True)
 
     return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", False, True)
+
 
 # =========================================================
 # Routes
