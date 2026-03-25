@@ -701,11 +701,11 @@ def extract_extended_intro_memory(student_text: str) -> Dict[str, Any]:
     if favorite_subject:
         out["favorite_subject"] = favorite_subject
 
-    if "mother" in low or "mom" in low or "mummy" in low:
+    if has_word(low, "mother") or has_word(low, "mom") or has_word(low, "mummy"):
         out.setdefault("family_context", {})["who_loves_you_more"] = "mother"
-    elif "father" in low or "dad" in low or "papa" in low:
+    elif has_word(low, "father") or has_word(low, "dad") or has_word(low, "papa"):
         out.setdefault("family_context", {})["who_loves_you_more"] = "father"
-    elif "grandmother" in low or "grandma" in low or "dida" in low or "nani" in low:
+    elif has_word(low, "grandmother") or has_word(low, "grandma") or has_word(low, "dida") or has_word(low, "nani"):
         out.setdefault("family_context", {})["who_loves_you_more"] = "grandmother"
 
     return out
@@ -1503,17 +1503,16 @@ def start_session(req: SessionStartRequest):
             "intro_started_at": time.time(),
         },
         "intro_memory": {
-    "topic_queue": shuffled_intro_topics(),
-    "asked_topics": [],
-    "answered_topics": [],
-    "last_topic": "",
-    "food_reacted_once": False,
-    "sport_reacted_once": False,
-    "hobby_reacted_once": False,
-    "other_interest_reacted_once": False,
-    "subject_reacted_once": False,
-    "subject_probe_done": False,
-},
+            "topic_queue": shuffled_intro_topics(),
+            "asked_topics": [],
+            "answered_topics": [],
+            "last_topic": "",
+            "food_reacted_once": False,
+            "sport_reacted_once": False,
+            "hobby_reacted_once": False,
+            "other_interest_reacted_once": False,
+            "subject_reacted_once": False,
+            "subject_probe_done": False,
         },
         "intro_chunks": lesson["intro_chunks"],
         "story_chunks": lesson["story_chunks"],
