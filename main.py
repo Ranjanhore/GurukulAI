@@ -7,7 +7,6 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Any, Dict, List
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +15,7 @@ from supabase import create_client, Client
 from openai import OpenAI
 
 
-app = FastAPI(title="GurukulAI Backend", version="13.1")
+app = FastAPI(title="GurukulAI Backend", version="13.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,7 +31,6 @@ LIVE_SESSION_TABLE = os.getenv("LIVE_SESSION_TABLE", "live_sessions").strip()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini").strip()
-OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "1.8"))
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
@@ -45,7 +43,6 @@ openai_client: Optional[OpenAI] = None
 if OPENAI_API_KEY:
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-OPENAI_POOL = ThreadPoolExecutor(max_workers=6)
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 REGIONAL_GUESS_MAP = {
@@ -209,6 +206,7 @@ PRONUNCIATION_MAP_BENGALI = {
 PRONUNCIATION_MAP_TAMIL = {}
 PRONUNCIATION_MAP_TELUGU = {}
 
+
 class SessionStartRequest(BaseModel):
     board: str
     class_name: Optional[str] = None
@@ -223,6 +221,7 @@ class SessionStartRequest(BaseModel):
     teacher_name: Optional[str] = None
     teacher_code: Optional[str] = None
 
+
 class RespondRequest(BaseModel):
     session_id: str
     text: Optional[str] = ""
@@ -231,6 +230,7 @@ class RespondRequest(BaseModel):
     preferred_language: Optional[str] = None
     teacher_name: Optional[str] = None
     teacher_code: Optional[str] = None
+
 
 class TurnResponse(BaseModel):
     ok: bool
@@ -247,11 +247,14 @@ class TurnResponse(BaseModel):
     meta: Optional[Dict[str, Any]] = None
     report: Optional[Dict[str, Any]] = None
 
+
 def normalize_class_name(value: Optional[str]) -> str:
     return str(value or "").replace("Class", "").replace("class", "").strip()
 
+
 def title_case_name(name: str) -> str:
     return " ".join(part.capitalize() for part in name.split())
+
 
 def pretty_language(value: Optional[str]) -> str:
     raw = (value or "").strip()
@@ -278,6 +281,7 @@ def pretty_language(value: Optional[str]) -> str:
     }
     return mapping.get(low, raw)
 
+
 def sanitize_teacher_name(name: Optional[str]) -> str:
     raw = str(name or "").strip()
     if not raw:
@@ -285,6 +289,7 @@ def sanitize_teacher_name(name: Optional[str]) -> str:
     if raw.lower().startswith("teacher "):
         return raw
     return f"Teacher {raw}"
+
 
 def current_greeting() -> str:
     hour = datetime.now(ZoneInfo("Asia/Kolkata")).hour
@@ -294,8 +299,10 @@ def current_greeting() -> str:
         return "Good afternoon"
     return "Good evening"
 
+
 def first_or_none(rows):
     return rows[0] if rows else None
+
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
@@ -308,17 +315,10 @@ def _json_safe(value: Any) -> Any:
         return value
     return str(value)
 
-def safe_json_loads(text: str) -> Dict[str, Any]:
-    text = (text or "").strip()
-    if not text:
-        return {}
-    try:
-        return json.loads(text)
-    except Exception:
-        return {}
 
 def append_history(state: Dict[str, Any], role: str, text: str) -> None:
     state.setdefault("history", []).append({"role": role, "text": text})
+
 
 def apply_alias_map(text: str, alias_map: Dict[str, str]) -> str:
     out = text
@@ -326,14 +326,17 @@ def apply_alias_map(text: str, alias_map: Dict[str, str]) -> str:
         out = out.replace(original, spoken)
     return out
 
+
 def build_speech_text(text: str, language: str) -> str:
     out = apply_alias_map(text, PRONUNCIATION_MAP_ENGLISH)
     if language == "Bengali":
         out = apply_alias_map(out, PRONUNCIATION_MAP_BENGALI)
     return out
 
+
 def speech_text(text: str, language: str = "English") -> str:
     return build_speech_text(text, language)
+
 
 def extract_student_name(text: str) -> Optional[str]:
     clean = re.sub(r"\s+", " ", (text or "").strip())
@@ -358,18 +361,34 @@ def extract_student_name(text: str) -> Optional[str]:
         return title_case_name(clean)
     return None
 
+
+def guess_language_from_name(full_name: str) -> Optional[str]:
+    words = [w.strip(" .,!?").lower() for w in full_name.split() if w.strip()]
+    for word in reversed(words):
+        if word in REGIONAL_GUESS_MAP:
+            return REGIONAL_GUESS_MAP[word]
+    return None
+
+
 def detect_specific_language_name(text: str) -> Optional[str]:
     low = (text or "").lower()
     for key, value in {
-        "hinglish": "Hinglish", "english": "English", "hindi": "Hindi",
-        "bengali": "Bengali", "bangla": "Bengali", "tamil": "Tamil", "telugu": "Telugu"
+        "hinglish": "Hinglish",
+        "english": "English",
+        "hindi": "Hindi",
+        "bengali": "Bengali",
+        "bangla": "Bengali",
+        "tamil": "Tamil",
+        "telugu": "Telugu",
     }.items():
         if re.search(rf"\b{re.escape(key)}\b", low):
             return value
     return None
 
+
 def detect_preferred_teaching_mode(text: str) -> Optional[str]:
     return detect_specific_language_name(text)
+
 
 def detect_hobby(text: str) -> Optional[str]:
     low = (text or "").lower().strip()
@@ -378,12 +397,14 @@ def detect_hobby(text: str) -> Optional[str]:
             return "gaming" if hobby in {"game", "games"} else hobby
     return None
 
+
 def detect_other_interest(text: str) -> Optional[str]:
     low = (text or "").lower()
     for item in ["animals", "nature", "space", "cars", "robots", "ai", "music", "movies", "cartoon", "travel", "cooking", "drawing", "games", "stories"]:
         if re.search(rf"\b{re.escape(item)}\b", low):
             return item
     return None
+
 
 def detect_favorite_subject(text: str) -> Optional[str]:
     low = (text or "").lower().strip()
@@ -395,13 +416,50 @@ def detect_favorite_subject(text: str) -> Optional[str]:
             return label.title()
     return None
 
+
+def detect_understood_signal(text: str) -> bool:
+    low = (text or "").lower().strip()
+    positives = [
+        "yes", "haan", "ha", "ok", "okay", "understood", "got it", "clear",
+        "samajh gaya", "samajh gayi", "bujhlam", "bujhechi",
+    ]
+    return any(p in low for p in positives)
+
+
+def detect_negative_signal(text: str) -> bool:
+    low = (text or "").lower().strip()
+    negatives = [
+        "no", "not understood", "did not understand", "don't understand", "dont understand",
+        "samajh nahi", "bujhini",
+    ]
+    return any(p in low for p in negatives)
+
+
+def is_short_interest_reply(text: str) -> bool:
+    low = (text or "").lower().strip()
+    if not low:
+        return False
+    allowed = {
+        "mango", "banana", "apple", "rice", "dal", "egg", "milk", "curd", "roti",
+        "fish", "chicken", "idli", "dosa", "poha", "upma", "khichdi",
+        "cricket", "football", "badminton", "basketball", "minecraft", "free fire",
+        "roblox", "chess", "carrom", "ludo", "mother", "father", "mom", "dad",
+        "grandmother", "grandma", "myself", "me", "english", "hindi", "hinglish",
+        "bengali", "bangla", "tamil", "telugu", "drawing", "singing", "dancing",
+        "reading", "science", "math", "history", "geography", "computer",
+    }
+    return low in allowed
+
+
 def normalize_topic_name(value: str) -> str:
     return re.sub(r"[^a-z_]", "", (value or "").lower().strip())
+
 
 def shuffled_intro_topics() -> List[str]:
     topics = INTRO_TOPICS[:]
     random.shuffle(topics)
     return topics
+
 
 def save_live_session(state: Dict[str, Any]) -> None:
     if not supabase:
@@ -416,13 +474,37 @@ def save_live_session(state: Dict[str, Any]) -> None:
         "part_no": state.get("part_no", 1),
         "state_json": _json_safe(state),
     }
-    supabase.table(LIVE_SESSION_TABLE).upsert(payload, on_conflict="session_id").execute()
+    try:
+        supabase.table(LIVE_SESSION_TABLE).upsert(payload, on_conflict="session_id").execute()
+    except Exception:
+        pass
+
 
 def load_live_session(session_id: str) -> Optional[Dict[str, Any]]:
-    return None
+    if not supabase:
+        return None
+    try:
+        row = supabase.table(LIVE_SESSION_TABLE).select("*").eq("session_id", session_id).limit(1).execute()
+        item = first_or_none(row.data)
+        if not item:
+            return None
+        state = item.get("state_json")
+        if isinstance(state, str):
+            state = json.loads(state)
+        return state if isinstance(state, dict) else None
+    except Exception:
+        return None
+
 
 def get_live_state(session_id: str) -> Optional[Dict[str, Any]]:
-    return SESSIONS.get(session_id)
+    state = SESSIONS.get(session_id)
+    if state:
+        return state
+    state = load_live_session(session_id)
+    if state:
+        SESSIONS[session_id] = state
+    return state
+
 
 def get_teacher_persona_from_db(teacher_code: Optional[str], teacher_name: Optional[str]) -> Dict[str, Any]:
     return {
@@ -433,17 +515,10 @@ def get_teacher_persona_from_db(teacher_code: Optional[str], teacher_name: Optio
         "hobby_profile": {"hobbies": ["reading", "storytelling"]},
     }
 
+
 def load_student_brain_memory(student_name: str, board: str, class_name: str) -> Dict[str, Any]:
     return {}
 
-def upsert_student_brain_memory(state: Dict[str, Any]) -> None:
-    return
-
-def insert_progress_log(state: Dict[str, Any], teacher_feedback: str = "", parent_feedback: str = "") -> None:
-    return
-
-def insert_parent_guidance_report(state: Dict[str, Any], summary: str, strengths: str, needs_focus: str, teacher_suggestions: str, parent_suggestions: str) -> None:
-    return
 
 def pick_teacher_from_db(board: str, class_name: str, subject: str, requested_name: Optional[str] = None, requested_code: Optional[str] = None) -> Dict[str, Any]:
     return {
@@ -451,6 +526,7 @@ def pick_teacher_from_db(board: str, class_name: str, subject: str, requested_na
         "teacher_code": requested_code,
         "voice_id": ELEVENLABS_VOICE_ID or None,
     }
+
 
 def update_language_usage(state: Dict[str, Any], text: str) -> None:
     memory = state.setdefault("student_memory", {})
@@ -465,6 +541,7 @@ def update_language_usage(state: Dict[str, Any], text: str) -> None:
     if not memory.get("preferred_language"):
         memory["preferred_language"] = strongest
 
+
 def record_keywords(state: Dict[str, Any], text: str) -> None:
     low = (text or "").lower()
     memory = state.setdefault("student_memory", {})
@@ -474,6 +551,7 @@ def record_keywords(state: Dict[str, Any], text: str) -> None:
         if key in low:
             keywords.add(key)
     known["keywords"] = sorted(list(keywords))
+
 
 def extract_interest_memory(student_text: str) -> Dict[str, Any]:
     low = (student_text or "").lower()
@@ -490,6 +568,7 @@ def extract_interest_memory(student_text: str) -> Dict[str, Any]:
     if lang:
         out["preferred_language"] = lang
     return out
+
 
 def extract_extended_intro_memory(student_text: str) -> Dict[str, Any]:
     out = extract_interest_memory(student_text)
@@ -511,6 +590,7 @@ def extract_extended_intro_memory(student_text: str) -> Dict[str, Any]:
         out.setdefault("family_context", {})["who_loves_you_more"] = "grandmother"
     return out
 
+
 def merge_student_memory(state: Dict[str, Any], new_bits: Dict[str, Any]) -> None:
     memory = state.setdefault("student_memory", {})
     for key, value in new_bits.items():
@@ -525,14 +605,6 @@ def merge_student_memory(state: Dict[str, Any], new_bits: Dict[str, Any]) -> Non
     if memory.get("preferred_language"):
         state["preferred_teaching_mode"] = pretty_language(memory.get("preferred_language"))
 
-def teacher_personal_answer(state: Dict[str, Any], student_text: str) -> Optional[str]:
-    return None
-
-def explain_technical_word_meaning(word: str, language: str) -> Optional[str]:
-    return None
-
-def maybe_gentle_language_model(state: Dict[str, Any], text: str) -> Optional[str]:
-    return None
 
 def preferred_explanation_style(state: Dict[str, Any]) -> str:
     pref = (
@@ -543,8 +615,10 @@ def preferred_explanation_style(state: Dict[str, Any]) -> str:
     )
     return pretty_language(pref) or "English"
 
+
 def mix_line_for_language(language: str, key: str) -> str:
     return LANGUAGE_MIX_LINES.get(language, LANGUAGE_MIX_LINES.get("English", {})).get(key, "")
+
 
 def react_to_name(name: str) -> str:
     return random.choice([
@@ -552,6 +626,7 @@ def react_to_name(name: str) -> str:
         f"Aha, {name}. Beautiful name.",
         f"Nice to meet you properly, {name}.",
     ])
+
 
 def build_mic_instruction(language: str) -> str:
     language = pretty_language(language or "English")
@@ -579,6 +654,7 @@ def build_mic_instruction(language: str) -> str:
         "Once teaching starts, the mic becomes manual, and then you need to press the mic button below in the center before speaking."
     )
 
+
 def build_mic_understanding_prompt(language: str) -> str:
     language = pretty_language(language or "English")
     if language == "Bengali":
@@ -589,11 +665,10 @@ def build_mic_understanding_prompt(language: str) -> str:
         return "Samajh aaya? Agar chaho to main isko kisi aur language mein bhi repeat kar sakti hoon. Jis language mein tum comfortable ho, main usko note kar loongi."
     return "Did you understand that? If you want, I can repeat it in another language too. Whichever language feels comfortable to you, I will note it."
 
-def build_reactive_intro_reply(state: Dict[str, Any], student_text: str) -> str:
-    return "I like the way you said that."
 
 def build_intro_reaction_then_followup(state: Dict[str, Any], student_text: str) -> str:
-    return build_reactive_intro_reply(state, student_text)
+    return "I like the way you said that."
+
 
 def next_intro_prompt(state: Dict[str, Any]) -> str:
     intro_memory = state.setdefault("intro_memory", {})
@@ -639,6 +714,7 @@ def next_intro_prompt(state: Dict[str, Any]) -> str:
     intro_memory["topic_queue"] = shuffled_intro_topics()
     return "Tell me something more about what you enjoy in your daily life."
 
+
 def react_to_interest(state: Dict[str, Any], student_text: str) -> Optional[str]:
     low = (student_text or "").lower().strip()
     intro_memory = state.setdefault("intro_memory", {})
@@ -664,12 +740,6 @@ def react_to_interest(state: Dict[str, Any], student_text: str) -> Optional[str]
         return "That is lovely. Fathers also show love in their own caring way."
     return None
 
-def fetch_random_chapter_question(state: Dict[str, Any]) -> Optional[str]:
-    return None
-
-def should_ask_subject_probe(state: Dict[str, Any]) -> bool:
-    intro_memory = state.setdefault("intro_memory", {})
-    return bool(state.get("student_memory", {}).get("favorite_subject") and not intro_memory.get("subject_probe_done"))
 
 def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject: str) -> List[str]:
     student_memory = state.get("student_memory", {}) or {}
@@ -702,6 +772,7 @@ def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject
         lines.append("Tai aaj amra chapter ta golper moto kore bujhbo.")
     return lines
 
+
 def generate_lesson_content(board: str, class_name: str, subject: str, chapter: str, teacher_name: str) -> Dict[str, Any]:
     greeting = current_greeting()
     return {
@@ -725,11 +796,6 @@ def generate_lesson_content(board: str, class_name: str, subject: str, chapter: 
         ],
     }
 
-def call_openai_json(system_prompt: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {}
-
-def build_teach_system_prompt(context: Dict[str, Any]) -> str:
-    return ""
 
 def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, done: bool, meta: Optional[Dict[str, Any]] = None) -> TurnResponse:
     teacher_text = re.sub(r"\s+", " ", teacher_text).strip()
@@ -767,6 +833,7 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
         },
     )
 
+
 def intro_is_ready_to_transition(state: Dict[str, Any]) -> bool:
     intro = state.get("intro_profile", {})
     turns = int(intro.get("intro_turn_count", 0))
@@ -782,6 +849,7 @@ def intro_is_ready_to_transition(state: Dict[str, Any]) -> bool:
     ]) >= 3
     min_turns = int(intro.get("min_intro_turns", 10))
     return (turns >= min_turns and has_name and has_lang and enough_context) or intro.get("ready_to_start") is True
+
 
 def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRequest) -> TurnResponse:
     intro = state.setdefault(
@@ -884,6 +952,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
     )
     return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
 
+
 def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) -> TurnResponse:
     low = (text or "").lower().strip()
     if mode == "story":
@@ -894,6 +963,7 @@ def answer_during_story_or_teach(state: Dict[str, Any], text: str, mode: str) ->
             state["phase"] = "TEACH"
             return make_turn(state, "No problem at all. The simple idea is this: just like our home gives us care and food, a plant also quietly prepares its own food through the leaf. Now let us go step by step into the chapter.", False, False, {"resume_phase": "TEACH"})
     return make_turn(state, "Good question. Let us continue together.", False, False, {"resume_phase": "TEACH"})
+
 
 def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
     idx = int(state.get("quiz_index", 0))
@@ -918,9 +988,11 @@ def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
     state["phase"] = "HOMEWORK"
     return make_turn(state, feedback + " Quiz complete.", False, False)
 
+
 def answer_during_homework(state: Dict[str, Any], text: str) -> TurnResponse:
     state["phase"] = "DONE"
     return make_turn(state, "Wonderful. We are done for today. Revise the chapter once and complete the homework.", False, True)
+
 
 def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
     phase = state["phase"]
@@ -964,6 +1036,7 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
         return make_turn(state, "Great work today. Your homework is: " + " ".join(items), False, True)
     return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", False, True)
 
+
 @app.get("/health")
 def health():
     return {
@@ -975,6 +1048,7 @@ def health():
         "elevenlabs_enabled": bool(ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID),
     }
 
+
 @app.post("/session/start")
 def start_session(req: SessionStartRequest):
     board = (req.board or "").strip()
@@ -983,6 +1057,7 @@ def start_session(req: SessionStartRequest):
     chapter_title = (req.chapter or req.chapter_title or "").strip()
     raw_language = pretty_language(req.preferred_language or req.language or "")
     student_name = title_case_name(req.student_name.strip()) if (req.student_name or "").strip() else ""
+
     if not board:
         raise HTTPException(status_code=422, detail="board is required")
     if not class_name:
@@ -991,6 +1066,7 @@ def start_session(req: SessionStartRequest):
         raise HTTPException(status_code=422, detail="subject is required")
     if not chapter_title:
         raise HTTPException(status_code=422, detail="chapter or chapter_title is required")
+
     teacher = pick_teacher_from_db(board, class_name, subject, req.teacher_name, req.teacher_code)
     teacher_name = sanitize_teacher_name(teacher.get("teacher_name") or req.teacher_name or "Asha Sharma")
     teacher_code = teacher.get("teacher_code") or req.teacher_code
@@ -998,10 +1074,11 @@ def start_session(req: SessionStartRequest):
     teacher_persona = get_teacher_persona_from_db(teacher_code, teacher_name)
     lesson = generate_lesson_content(board, class_name, subject, chapter_title, teacher_name)
     session_id = str(uuid.uuid4())
-    existing_student_memory = load_student_brain_memory(student_name, board, class_name) if student_name else {}
+    existing_student_memory = load_student_brain_memory(student_name, board, class_name)
     remembered_pref = pretty_language(existing_student_memory.get("preferred_language") or "")
     request_pref = pretty_language(raw_language or "")
     preferred_from_memory = remembered_pref if remembered_pref else None
+
     student_memory: Dict[str, Any] = {
         "preferred_language": preferred_from_memory,
         "strongest_language": existing_student_memory.get("strongest_language") or preferred_from_memory,
@@ -1025,6 +1102,7 @@ def start_session(req: SessionStartRequest):
         "known_facts": existing_student_memory.get("known_facts", {}),
         "language_usage": existing_student_memory.get("language_usage", {}),
     }
+
     state: Dict[str, Any] = {
         "session_id": session_id,
         "teacher_id": teacher.get("id"),
@@ -1080,8 +1158,10 @@ def start_session(req: SessionStartRequest):
         "stress_score": 20.0,
         "history": [],
     }
+
     SESSIONS[session_id] = state
     save_live_session(state)
+
     return {
         "ok": True,
         "session_id": session_id,
@@ -1099,45 +1179,60 @@ def start_session(req: SessionStartRequest):
         },
     }
 
+
 @app.post("/respond", response_model=TurnResponse)
 def respond(req: RespondRequest):
-    state = get_live_state(req.session_id)
-    if not state:
-        return TurnResponse(
-            ok=False,
-            session_id=req.session_id,
-            phase="INTRO",
-            teacher_text="Your class session was interrupted. Please press Start Class once more.",
-            awaiting_user=False,
-            done=False,
-        )
-    if req.teacher_name and req.teacher_name.strip():
-        state["teacher_name"] = sanitize_teacher_name(req.teacher_name.strip())
-    if req.student_name and req.student_name.strip() and not state.get("student_name"):
-        parsed_req_name = extract_student_name(req.student_name.strip())
-        if parsed_req_name:
-            state["student_name"] = parsed_req_name
-    incoming_language = req.preferred_language or req.language
-    if incoming_language and incoming_language.strip():
-        state["language"] = pretty_language(incoming_language.strip()) or state.get("language") or "English"
-    text = (req.text or "").strip()
-    if not text:
-        return serve_next_auto_turn(state)
-    adjust = text.lower()
-    if any(x in adjust for x in ["don't understand", "dont understand", "confused", "difficult", "hard"]):
-        state["confidence_score"] = max(10.0, float(state.get("confidence_score", 50.0)) - 8.0)
-        state["stress_score"] = min(100.0, float(state.get("stress_score", 20.0)) + 10.0)
-    else:
-        state["confidence_score"] = min(100.0, float(state.get("confidence_score", 50.0)) + 2.0)
-    append_history(state, "student", text)
-    if state["phase"] == "INTRO":
-        return answer_during_intro(state, text, req)
-    if state["phase"] == "STORY":
-        return answer_during_story_or_teach(state, text, mode="story")
-    if state["phase"] == "TEACH":
-        return answer_during_story_or_teach(state, text, mode="teach")
-    if state["phase"] == "QUIZ":
-        return answer_during_quiz(state, text)
-    if state["phase"] == "HOMEWORK":
-        return answer_during_homework(state, text)
-    return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", False, True)
+    try:
+        state = get_live_state(req.session_id)
+        if not state:
+            return TurnResponse(
+                ok=False,
+                session_id=req.session_id,
+                phase="INTRO",
+                teacher_text="Your class session was interrupted. Please press Start Class once more.",
+                awaiting_user=False,
+                done=False,
+            )
+
+        if req.teacher_name and req.teacher_name.strip():
+            state["teacher_name"] = sanitize_teacher_name(req.teacher_name.strip())
+
+        if req.student_name and req.student_name.strip() and not state.get("student_name"):
+            parsed_req_name = extract_student_name(req.student_name.strip())
+            if parsed_req_name:
+                state["student_name"] = parsed_req_name
+
+        incoming_language = req.preferred_language or req.language
+        if incoming_language and incoming_language.strip():
+            state["language"] = pretty_language(incoming_language.strip()) or state.get("language") or "English"
+
+        text = (req.text or "").strip()
+        if not text:
+            return serve_next_auto_turn(state)
+
+        adjust = text.lower()
+        if any(x in adjust for x in ["don't understand", "dont understand", "confused", "difficult", "hard"]):
+            state["confidence_score"] = max(10.0, float(state.get("confidence_score", 50.0)) - 8.0)
+            state["stress_score"] = min(100.0, float(state.get("stress_score", 20.0)) + 10.0)
+        else:
+            state["confidence_score"] = min(100.0, float(state.get("confidence_score", 50.0)) + 2.0)
+
+        append_history(state, "student", text)
+
+        if state["phase"] == "INTRO":
+            return answer_during_intro(state, text, req)
+        if state["phase"] == "STORY":
+            return answer_during_story_or_teach(state, text, mode="story")
+        if state["phase"] == "TEACH":
+            return answer_during_story_or_teach(state, text, mode="teach")
+        if state["phase"] == "QUIZ":
+            return answer_during_quiz(state, text)
+        if state["phase"] == "HOMEWORK":
+            return answer_during_homework(state, text)
+
+        return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", False, True)
+    except Exception as e:
+        import traceback
+        print("RESPOND CRASH:", repr(e))
+        traceback.print_exc()
+        raise
