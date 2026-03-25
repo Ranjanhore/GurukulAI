@@ -1272,28 +1272,28 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             )
 
     interest_reaction = react_to_interest(state, student_text)
- if interest_reaction:
-    next_prompt = next_intro_prompt(state)
+    if interest_reaction:
+        next_prompt = next_intro_prompt(state)
 
-    if next_prompt:
-        return make_turn(state, f"{interest_reaction} {next_prompt}", True, False)
+        if next_prompt:
+            return make_turn(state, f"{interest_reaction} {next_prompt}", True, False)
 
-    pref = preferred_explanation_style(state)
-    state["phase"] = "STORY"
+        pref = preferred_explanation_style(state)
+        state["phase"] = "STORY"
 
-    if not state.get("story_chunks"):
-        state["story_chunks"] = build_story_from_student_memory(
-            state,
-            state.get("chapter", ""),
-            state.get("subject", ""),
+        if not state.get("story_chunks"):
+            state["story_chunks"] = build_story_from_student_memory(
+                state,
+                state.get("chapter", ""),
+                state.get("subject", ""),
+            )
+
+        preface = (
+            f"{interest_reaction} "
+            f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
+            "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
         )
-
-    preface = (
-        f"{interest_reaction} "
-        f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
-        "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
-    )
-    return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
+        return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
 
     if is_short_interest_reply(student_text):
         next_prompt = next_intro_prompt(state)
@@ -1392,15 +1392,15 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
             return make_turn(state, chunks[idx], True, False, {"intro_index": idx})
         return make_turn(state, "Tell me your full name once nicely.", True, False, {"intro_index": idx})
 
-    if phase == "STORY":
-        idx = int(state.get("story_index", 0))
-        chunks = state.get("story_chunks", [])
-        if idx < len(chunks):
-            state["story_index"] = idx + 1
-            return make_turn(state, chunks[idx], False, False, {"story_index": idx})
+  if phase == "STORY":
+    idx = int(state.get("story_index", 0))
+    chunks = state.get("story_chunks", [])
+    if idx < len(chunks):
+        state["story_index"] = idx + 1
+        return make_turn(state, chunks[idx], False, False, {"story_index": idx})
 
-        state["phase"] = "TEACH"
-        return serve_next_auto_turn(state)
+    state["phase"] = "TEACH"
+    return serve_next_auto_turn(state)
 
     if phase == "TEACH":
         idx = int(state.get("teach_index", 0))
