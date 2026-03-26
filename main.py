@@ -37,7 +37,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # APP
 # =========================================================
 
-app = FastAPI(title="GurukulAI Backend", version="4.0.0")
+app = FastAPI(title="GurukulAI Backend", version="4.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,7 +56,7 @@ SESSION_STORE: Dict[str, Dict[str, Any]] = {}
 
 
 # =========================================================
-# HELPERS
+# GENERIC HELPERS
 # =========================================================
 
 def now_ts() -> int:
@@ -118,6 +118,201 @@ def build_storage_prefix(
     if part:
         parts.append(slugify(part))
     return "/".join([p for p in parts if p])
+
+
+# =========================================================
+# TEXT INTENT HELPERS
+# =========================================================
+
+def wants_question(text: str) -> bool:
+    x = safe_str(text).lower()
+    return any(k in x for k in ["ask me", "question", "oral question", "test me", "quiz me"])
+
+
+def wants_practice(text: str) -> bool:
+    x = safe_str(text).lower()
+    return any(k in x for k in ["practice", "written", "solve", "exercise", "worksheet"])
+
+
+def looks_like_yes(text: str) -> bool:
+    x = safe_str(text).lower()
+    yes_words = {
+        "yes", "haan", "ha", "hmm", "ok", "okay", "sure", "start", "begin",
+        "continue", "go on", "go ahead", "ready", "teach", "proceed", "y"
+    }
+    return x in yes_words or any(phrase in x for phrase in ["lets start", "let's start", "start now", "continue now"])
+
+
+def looks_like_next(text: str) -> bool:
+    x = safe_str(text).lower()
+    return any(k in x for k in ["next", "continue", "go on", "move on", "aage", "ahead", "further"])
+
+
+def looks_like_previous(text: str) -> bool:
+    x = safe_str(text).lower()
+    return any(k in x for k in ["previous", "back", "go back", "pichla", "repeat previous"])
+
+
+def wants_example(text: str) -> bool:
+    x = safe_str(text).lower()
+    return any(k in x for k in ["example", "real life", "real-life", "story", "easy example"])
+
+
+def wants_summary(text: str) -> bool:
+    x = safe_str(text).lower()
+    return any(k in x for k in ["summary", "revision", "revise", "recap", "short"])
+
+
+def wants_assets(text: str) -> bool:
+    x = safe_str(text).lower()
+    return any(k in x for k in ["diagram", "image", "video", "show", "picture", "asset"])
+
+
+# =========================================================
+# PART JSON HELPERS
+# =========================================================
+
+def parse_json_field(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            return None
+    return None
+
+
+def get_current_part(bundle: Dict[str, Any], session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    parts = bundle.get("chapter_parts", []) or []
+    if not parts:
+        return None
+
+    idx = session.get("current_part_index", 0)
+    idx = max(0, min(idx, len(parts) - 1))
+    session["current_part_index"] = idx
+    return parts[idx]
+
+
+def get_part_interaction_data(part_row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not part_row:
+        return {
+            "story_chunks": [],
+            "teach_chunks": [],
+            "recap_chunks": [],
+            "homework_items": [],
+            "oral_question_bank": [],
+            "written_practice_bank": [],
+            "answer_key": [],
+            "teacher_feedback_bank": {"correct": [], "partial": [], "wrong": []},
+        }
+
+    story_chunks = parse_json_field(part_row.get("story_chunks")) or []
+    teach_chunks = parse_json_field(part_row.get("teach_chunks")) or []
+    recap_chunks = parse_json_field(part_row.get("recap_chunks")) or []
+    homework_items = parse_json_field(part_row.get("homework_items")) or []
+
+    oral_question_bank: List[str] = []
+    written_practice_bank: List[str] = []
+    answer_key: List[Dict[str, Any]] = []
+    teacher_feedback_bank = {"correct": [], "partial": [], "wrong": []}
+
+    if isinstance(homework_items, list):
+        for item in homework_items:
+            if not isinstance(item, dict):
+                continue
+
+            item_type = safe_str(item.get("type")).lower()
+            items = item.get("items")
+
+            if item_type == "oral_question_bank" and isinstance(items, list):
+                oral_question_bank = [safe_str(x) for x in items if safe_str(x)]
+
+            elif item_type == "written_practice_bank" and isinstance(items, list):
+                written_practice_bank = [safe_str(x) for x in items if safe_str(x)]
+
+            elif item_type == "answer_key" and isinstance(items, list):
+                answer_key = items
+
+            elif item_type == "teacher_feedback_bank" and isinstance(items, dict):
+                teacher_feedback_bank = {
+                    "correct": [safe_str(x) for x in items.get("correct", []) if safe_str(x)],
+                    "partial": [safe_str(x) for x in items.get("partial", []) if safe_str(x)],
+                    "wrong": [safe_str(x) for x in items.get("wrong", []) if safe_str(x)],
+                }
+
+    return {
+        "story_chunks": story_chunks,
+        "teach_chunks": teach_chunks,
+        "recap_chunks": recap_chunks,
+        "homework_items": homework_items,
+        "oral_question_bank": oral_question_bank,
+        "written_practice_bank": written_practice_bank,
+        "answer_key": answer_key,
+        "teacher_feedback_bank": teacher_feedback_bank,
+    }
+
+
+def choose_part_prompt(options: List[str], fallback: str = "") -> str:
+    cleaned = [safe_str(x) for x in options if safe_str(x)]
+    if not cleaned:
+        return fallback
+    return random.choice(cleaned)
+
+
+def find_answer_key_match(answer_key: List[Dict[str, Any]], student_message: str) -> Optional[Dict[str, Any]]:
+    msg = safe_str(student_message).lower()
+    if not msg:
+        return None
+
+    for row in answer_key:
+        if not isinstance(row, dict):
+            continue
+
+        q = safe_str(row.get("question")).lower()
+        a = safe_str(row.get("answer"))
+        if not q or not a:
+            continue
+
+        q_words = set(re.findall(r"[a-z0-9]+", q))
+        msg_words = set(re.findall(r"[a-z0-9]+", msg))
+        if q_words and len(q_words.intersection(msg_words)) >= max(2, min(4, len(q_words))):
+            return row
+
+    return None
+
+
+def evaluate_student_response(student_message: str, answer_key: List[Dict[str, Any]]) -> str:
+    msg = safe_str(student_message).lower()
+    if not msg:
+        return "wrong"
+
+    key_match = find_answer_key_match(answer_key, student_message)
+    if not key_match:
+        if len(msg.split()) >= 6:
+            return "partial"
+        return "wrong"
+
+    expected = safe_str(key_match.get("answer")).lower()
+    expected_words = set(re.findall(r"[a-z0-9]+", expected))
+    msg_words = set(re.findall(r"[a-z0-9]+", msg))
+
+    if not expected_words:
+        return "partial"
+
+    overlap = len(expected_words.intersection(msg_words))
+    ratio = overlap / max(1, len(expected_words))
+
+    if ratio >= 0.7:
+        return "correct"
+    if ratio >= 0.3:
+        return "partial"
+    return "wrong"
 
 
 # =========================================================
@@ -303,6 +498,7 @@ def ensure_session(session_id: Optional[str]) -> Tuple[str, Dict[str, Any]]:
             "used_example_prefixes": [],
             "used_summary_prefixes": [],
             "history": [],
+            "current_part_index": 0,
             "current_chunk_index": 0,
         }
     return sid, SESSION_STORE[sid]
@@ -521,67 +717,8 @@ def build_teaching_payload(
 
 
 # =========================================================
-# TEACHING ENGINE
+# CHUNK / PART FLOW
 # =========================================================
-
-def looks_like_yes(text: str) -> bool:
-    x = safe_str(text).lower()
-    yes_words = {
-        "yes", "haan", "ha", "hmm", "ok", "okay", "sure", "start", "begin",
-        "continue", "go on", "go ahead", "ready", "teach", "proceed", "y"
-    }
-    return x in yes_words or any(phrase in x for phrase in ["lets start", "let's start", "start now", "continue now"])
-
-
-def looks_like_next(text: str) -> bool:
-    x = safe_str(text).lower()
-    return any(k in x for k in ["next", "continue", "go on", "move on", "aage", "ahead", "further"])
-
-
-def looks_like_previous(text: str) -> bool:
-    x = safe_str(text).lower()
-    return any(k in x for k in ["previous", "back", "go back", "pichla", "repeat previous"])
-
-
-def wants_example(text: str) -> bool:
-    x = safe_str(text).lower()
-    return any(k in x for k in ["example", "real life", "real-life", "story", "easy example"])
-
-
-def wants_summary(text: str) -> bool:
-    x = safe_str(text).lower()
-    return any(k in x for k in ["summary", "revision", "revise", "recap", "short"])
-
-
-def wants_assets(text: str) -> bool:
-    x = safe_str(text).lower()
-    return any(k in x for k in ["diagram", "image", "video", "show", "picture", "asset"])
-
-
-def build_intro_text(session: Dict[str, Any]) -> str:
-    profile = get_brain_profile(session["class_level"])
-    intro = choose_non_repetitive(profile["intro_bank"], session["used_greetings"], profile["intro_bank"][0])
-    question = choose_non_repetitive(profile["question_bank"], session["used_questions"], profile["question_bank"][0])
-
-    band = profile["band"]
-    if band == "tiny":
-        return f"{intro} We will learn little by little. {question}"
-    if band == "young":
-        return f"{intro} We will go step by step. {question}"
-    if band == "middle":
-        return f"{intro} We will connect ideas clearly. {question}"
-    return f"{intro} We will keep it clear, structured, and age-appropriate. {question}"
-
-
-def build_praise(session: Dict[str, Any]) -> str:
-    profile = get_brain_profile(session["class_level"])
-    return choose_non_repetitive(profile["praise_bank"], session["used_praises"], profile["praise_bank"][0])
-
-
-def build_transition(session: Dict[str, Any]) -> str:
-    profile = get_brain_profile(session["class_level"])
-    return choose_non_repetitive(profile["transition_bank"], session["used_transitions"], profile["transition_bank"][0])
-
 
 def get_current_chunk(chunks: List[Dict[str, Any]], session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not chunks:
@@ -612,6 +749,35 @@ def move_previous_chunk(chunks: List[Dict[str, Any]], session: Dict[str, Any]) -
     return chunks[0], True
 
 
+# =========================================================
+# TEACHING TEXT BUILDERS
+# =========================================================
+
+def build_intro_text(session: Dict[str, Any]) -> str:
+    profile = get_brain_profile(session["class_level"])
+    intro = choose_non_repetitive(profile["intro_bank"], session["used_greetings"], profile["intro_bank"][0])
+    question = choose_non_repetitive(profile["question_bank"], session["used_questions"], profile["question_bank"][0])
+
+    band = profile["band"]
+    if band == "tiny":
+        return f"{intro} We will learn little by little. {question}"
+    if band == "young":
+        return f"{intro} We will go step by step. {question}"
+    if band == "middle":
+        return f"{intro} We will connect ideas clearly. {question}"
+    return f"{intro} We will keep it clear, structured, and age-appropriate. {question}"
+
+
+def build_praise(session: Dict[str, Any]) -> str:
+    profile = get_brain_profile(session["class_level"])
+    return choose_non_repetitive(profile["praise_bank"], session["used_praises"], profile["praise_bank"][0])
+
+
+def build_transition(session: Dict[str, Any]) -> str:
+    profile = get_brain_profile(session["class_level"])
+    return choose_non_repetitive(profile["transition_bank"], session["used_transitions"], profile["transition_bank"][0])
+
+
 def build_chunk_explanation(session: Dict[str, Any], bundle: Dict[str, Any], chunk: Optional[Dict[str, Any]]) -> str:
     transition = build_transition(session)
     class_level = session["class_level"]
@@ -630,6 +796,75 @@ def build_chunk_explanation(session: Dict[str, Any], bundle: Dict[str, Any], chu
 
     text = rewrite_for_class_level(raw, class_level, chapter_title)
     return f"{transition} {text}"
+
+
+def build_part1_live_teaching_text(session: Dict[str, Any], bundle: Dict[str, Any], chunk: Optional[Dict[str, Any]]) -> str:
+    part_row = get_current_part(bundle, session)
+    pdata = get_part_interaction_data(part_row)
+    transition = build_transition(session)
+    class_level = session["class_level"]
+    chapter_title = bundle["chapter"]["title"]
+
+    base = safe_str(chunk.get("content")) if chunk else ""
+    base = rewrite_for_class_level(base, class_level, chapter_title) if base else ""
+
+    teach_hint = choose_part_prompt(pdata["teach_chunks"])
+    if teach_hint:
+        teach_hint = rewrite_for_class_level(teach_hint, class_level, chapter_title)
+
+    oral_q = choose_part_prompt(pdata["oral_question_bank"])
+
+    parts = [transition]
+    if base:
+        parts.append(base)
+    if teach_hint:
+        parts.append(teach_hint)
+    if oral_q:
+        parts.append(oral_q)
+
+    return " ".join([p for p in parts if p]).strip()
+
+
+def build_part_question_response(session: Dict[str, Any], bundle: Dict[str, Any]) -> str:
+    part_row = get_current_part(bundle, session)
+    pdata = get_part_interaction_data(part_row)
+    q = choose_part_prompt(pdata["oral_question_bank"])
+    if not q:
+        q = "Can you answer one question from this part?"
+    return q
+
+
+def build_part_practice_response(session: Dict[str, Any], bundle: Dict[str, Any]) -> str:
+    part_row = get_current_part(bundle, session)
+    pdata = get_part_interaction_data(part_row)
+    q = choose_part_prompt(pdata["written_practice_bank"])
+    if not q:
+        q = "Try one short written question from this part."
+    return q
+
+
+def build_feedback_response(session: Dict[str, Any], student_message: str, bundle: Dict[str, Any]) -> str:
+    part_row = get_current_part(bundle, session)
+    pdata = get_part_interaction_data(part_row)
+    answer_key = pdata["answer_key"]
+    feedback_bank = pdata["teacher_feedback_bank"]
+
+    grade = evaluate_student_response(student_message, answer_key)
+    choices = feedback_bank.get(grade, []) if isinstance(feedback_bank, dict) else []
+    feedback_line = choose_part_prompt(choices, "Let us check it carefully.")
+
+    matched = find_answer_key_match(answer_key, student_message)
+    expected = safe_str(matched.get("answer")) if matched else ""
+
+    if grade == "correct":
+        return feedback_line
+    if grade == "partial":
+        if expected:
+            return f"{feedback_line} Expected idea: {expected}"
+        return feedback_line
+    if expected:
+        return f"{feedback_line} Correct form: {expected}"
+    return feedback_line
 
 
 def build_example_response(session: Dict[str, Any], bundle: Dict[str, Any]) -> str:
@@ -759,6 +994,7 @@ def start_session(req: StartSessionRequest):
     session["chapter"] = req.chapter
     session["teaching_style"] = choose_teaching_style(req.class_level)
     session["current_chunk_index"] = 0
+    session["current_part_index"] = 0
 
     bundle = build_teaching_payload(
         board=req.board,
@@ -771,7 +1007,7 @@ def start_session(req: StartSessionRequest):
     chunks = bundle.get("chunks", [])
     current_chunk = get_current_chunk(chunks, session)
     intro = build_intro_text(session)
-    teaching = build_chunk_explanation(session, bundle, current_chunk)
+    teaching = build_part1_live_teaching_text(session, bundle, current_chunk)
 
     if req.class_level <= 2:
         teacher_text = f"{intro} Today we will learn {req.chapter}. {teaching}"
@@ -799,6 +1035,7 @@ def start_session(req: StartSessionRequest):
             "current_chunk_index": session["current_chunk_index"],
             "current_chunk_id": current_chunk.get("id") if current_chunk else None,
         },
+        "part_interaction": get_part_interaction_data(get_current_part(bundle, session)),
         "teaching_bundle": bundle,
     }
 
@@ -834,42 +1071,42 @@ def respond(req: StudentTurnRequest):
 
     chunks = bundle.get("chunks", [])
     current_chunk = get_current_chunk(chunks, session)
-    praise = build_praise(session)
 
     if looks_like_yes(student_message):
-        teacher_text = build_summary_response(session, bundle, chunks)
+        teacher_text = build_part1_live_teaching_text(session, bundle, current_chunk)
+
     elif looks_like_next(student_message):
         next_chunk, finished = move_next_chunk(chunks, session)
         if finished:
-            if session["class_level"] <= 2:
-                teacher_text = f"{praise} We finished this part. Shall I revise it now?"
-            elif session["class_level"] <= 5:
-                teacher_text = f"{praise} We reached the end of the loaded chapter flow. Would you like a recap?"
-            else:
-                teacher_text = f"{praise} We reached the end of the loaded chapter flow. You can ask for revision, examples, or assets."
+            teacher_text = build_summary_response(session, bundle, chunks)
         else:
-            teacher_text = build_chunk_explanation(session, bundle, next_chunk)
+            teacher_text = build_part1_live_teaching_text(session, bundle, next_chunk)
 
     elif looks_like_previous(student_message):
         prev_chunk, at_start = move_previous_chunk(chunks, session)
         if at_start:
-            teacher_text = f"{praise} We are already at the beginning. {build_chunk_explanation(session, bundle, prev_chunk)}"
+            teacher_text = f"{build_praise(session)} We are already at the beginning. {build_part1_live_teaching_text(session, bundle, prev_chunk)}"
         else:
-            teacher_text = build_chunk_explanation(session, bundle, prev_chunk)
+            teacher_text = build_part1_live_teaching_text(session, bundle, prev_chunk)
+
+    elif wants_question(student_message):
+        teacher_text = build_part_question_response(session, bundle)
+
+    elif wants_practice(student_message):
+        teacher_text = build_part_practice_response(session, bundle)
 
     elif wants_example(student_message):
         teacher_text = build_example_response(session, bundle)
 
     elif wants_summary(student_message):
-        teacher_text = buildSummary = build_summary_response(session, bundle, chunks)
+        teacher_text = build_summary_response(session, bundle, chunks)
 
     elif wants_assets(student_message):
         teacher_text = build_asset_response(session, bundle)
 
     else:
-        profile = get_brain_profile(session["class_level"])
-        followup = choose_non_repetitive(profile["question_bank"], session["used_questions"], profile["question_bank"][0])
-        teacher_text = f"{praise} {build_chunk_explanation(session, bundle, current_chunk)} {followup}"
+        feedback = build_feedback_response(session, student_message, bundle)
+        teacher_text = f"{feedback} {build_part_question_response(session, bundle)}"
 
     current_chunk_after = get_current_chunk(chunks, session)
     session["history"].append({"role": "teacher", "text": teacher_text, "ts": now_ts()})
@@ -883,6 +1120,7 @@ def respond(req: StudentTurnRequest):
             "teaching_style": session["teaching_style"],
             "age_band": get_age_band(session["class_level"]),
         },
+        "part_interaction": get_part_interaction_data(get_current_part(bundle, session)),
         "teaching_bundle": bundle,
         "session_meta": {
             "history_count": len(session["history"]),
