@@ -593,34 +593,35 @@ def build_teacher_bundle(board: str, class_level: int, subject: str) -> Dict[str
     teacher_map = fetch_teacher_mapping(board, class_level, subject)
 
     if not teacher_map:
-        return {
-            "profile": {
-                "teacher_name": "Teacher Asha",
-                "teacher_code": "default_teacher",
-                "role_label": "AI Teacher",
-                "base_language": "English",
-                "accent_style": "Indian",
-                "voice_provider": "",
-                "voice_id": "",
-            },
-            "persona": None,
-            "avatar": None,
-            "mapping": None,
-        }
+return {
+    "profile": {
+        "id": None,
+        "teacher_name": "Asha Sharma",
+        "teacher_code": "ASHA_SHARMA",
+        "role_label": "AI Teacher",
+        "base_language": "English",
+        "accent_style": "Indian",
+        "voice_provider": "",
+        "voice_id": "",
+    },
+    "persona": None,
+    "avatar": None,
+    "mapping": None,
+}
 
- profile = teacher_map["profile"]
+profile = teacher_map["profile"]
 teacher_id = profile.get("id")
 teacher_name = safe_str(profile.get("teacher_name"))
 
 persona = fetch_teacher_persona(teacher_id) if teacher_id else None
 avatar = fetch_teacher_avatar(teacher_name) if teacher_name else None
 
-    return {
-        "profile": profile,
-        "persona": persona,
-        "avatar": avatar,
-        "mapping": teacher_map.get("mapping"),
-    }
+return {
+    "profile": profile,
+    "persona": persona,
+    "avatar": avatar,
+    "mapping": teacher_map,
+}
 
 
 def fetch_book(board: str, class_level: int, subject: str, book: str) -> Optional[Dict[str, Any]]:
