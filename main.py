@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, Any, Dict, List
+from collections import defaultdict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +19,7 @@ from openai import OpenAI
 # =========================================================
 # App
 # =========================================================
-app = FastAPI(title="GurukulAI Backend", version="13.6")
+app = FastAPI(title="GurukulAI Backend", version="14.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,6 +51,7 @@ if OPENAI_API_KEY:
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
+INTERACTION_MEMORY: Dict[str, Dict[str, Any]] = {}
 
 # =========================================================
 # Static Data
@@ -224,6 +226,65 @@ PRONUNCIATION_MAP_BENGALI = {
     "Mic": "Myke",
 }
 
+INTERACTION_BANK = {
+    "name_reaction": [
+        "Very nice, {name}. That is a lovely name.",
+        "Aha, {name}. Beautiful name.",
+        "Nice to meet you properly, {name}.",
+        "That is such a warm name, {name}.",
+        "Lovely, {name}. I am happy to know your name now.",
+    ],
+    "food_reaction": [
+        "{item} sounds tasty. Food choices tell a lot about what makes us happy.",
+        "Ah, {item} - that sounds delicious.",
+        "{item} is a lovely choice. It feels cheerful and comforting.",
+        "Very nice, {item}. That sounds like a favorite made with joy.",
+        "{item} sounds wonderful. Food often carries happy memories too.",
+    ],
+    "sport_reaction": [
+        "{item} sounds energetic and fun.",
+        "Very nice, {item}. That shows speed, focus, and confidence.",
+        "{item} is exciting. It often builds teamwork and smart thinking.",
+        "Lovely choice - {item} can make the body and mind active together.",
+        "{item} sounds great. That tells me you enjoy movement and challenge.",
+    ],
+    "hobby_reaction": [
+        "{item} is beautiful. It tells me your mind likes to create and explore.",
+        "That is lovely. {item} can make learning feel more personal and joyful.",
+        "{item} sounds wonderful. It often shows imagination and inner interest.",
+        "Very nice, {item}. That tells me you enjoy expressing yourself.",
+        "{item} is a lovely hobby. It gives a special color to daily life.",
+    ],
+    "family_reaction": [
+        "That is very sweet.",
+        "That is lovely to hear.",
+        "That feels warm and beautiful.",
+        "Aww, that is so sweet.",
+        "That shows a lot of love at home.",
+    ],
+    "transition_to_story": [
+        "Now let us step gently into today's chapter through a meaningful little story.",
+        "Now let me connect your life with today's chapter through a small story.",
+        "Let us enter today's lesson softly, starting with a story close to life.",
+        "Now I will open the chapter with a real-life style story for you.",
+        "Let us begin the chapter in a warm and meaningful way through a story.",
+    ],
+    "story_intro": [
+        "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly.",
+        "First I will tell you a small life-connected story, and then we will move into the chapter step by step.",
+        "First comes a story, then we will slowly open the chapter together.",
+        "Let me begin with a real-life story, and from there we will enter the chapter naturally.",
+        "I will begin with a small story from life, and then we will move into the lesson.",
+    ],
+    "generic_positive": [
+        "Very nice.",
+        "Lovely.",
+        "Good.",
+        "That is nice.",
+        "Beautiful.",
+    ],
+}
+
 # =========================================================
 # Models
 # =========================================================
@@ -350,6 +411,55 @@ def has_word(text: str, word: str) -> bool:
 def clean_student_reply(text: str) -> str:
     value = re.sub(r"\s+", " ", (text or "").strip(" .,!?\n\t"))
     return value[:60]
+
+
+def slugify_chapter(value: str) -> str:
+    value = (value or "").strip().lower()
+    value = re.sub(r"[^\w\s-]", "", value)
+    value = re.sub(r"[\s_]+", "-", value)
+    value = re.sub(r"-+", "-", value).strip("-")
+    return value
+
+
+# =========================================================
+# Variation Helpers
+# =========================================================
+def _interaction_bucket(session_id: str) -> Dict[str, Any]:
+    return INTERACTION_MEMORY.setdefault(
+        session_id,
+        {
+            "used": defaultdict(list),
+            "last_used": {},
+        },
+    )
+
+
+def pick_varied_line(state: Dict[str, Any], key: str, **kwargs) -> str:
+    session_id = state["session_id"]
+    bucket = _interaction_bucket(session_id)
+    options = INTERACTION_BANK.get(key, [])
+    if not options:
+        return ""
+
+    used = bucket["used"][key]
+    last_used = bucket["last_used"].get(key)
+
+    candidates = [x for x in options if x != last_used and x not in used]
+    if not candidates:
+        used.clear()
+        candidates = [x for x in options if x != last_used] or options[:]
+
+    chosen = random.choice(candidates)
+    used.append(chosen)
+    if len(used) > max(1, len(options) - 1):
+        used[:] = used[-max(1, len(options) // 2):]
+
+    bucket["last_used"][key] = chosen
+    return chosen.format(**kwargs)
+
+
+def varied_join(*parts: str) -> str:
+    return " ".join([p.strip() for p in parts if p and p.strip()]).strip()
 
 
 # =========================================================
@@ -567,6 +677,99 @@ def pick_teacher_from_db(board: str, class_name: str, subject: str, requested_na
     }
 
 
+def get_teaching_assets_from_db(
+    board: str,
+    class_level: str,
+    subject: str,
+    chapter_title: str,
+    part_no: int,
+    asset_role: Optional[str] = None,
+    asset_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    if not supabase:
+        return []
+
+    chapter_slug = slugify_chapter(chapter_title)
+
+    try:
+        query = (
+            supabase.table("teaching_assets")
+            .select("*")
+            .eq("board", board)
+            .eq("class_level", int(class_level))
+            .eq("subject", subject)
+            .eq("chapter_slug", chapter_slug)
+            .eq("part_no", int(part_no))
+            .eq("active", True)
+        )
+
+        if asset_role:
+            query = query.eq("asset_role", asset_role)
+        if asset_type:
+            query = query.eq("asset_type", asset_type)
+
+        result = query.order("sort_order").execute()
+        return result.data or []
+    except Exception as e:
+        print("TEACHING_ASSET_DB_ERROR:", repr(e))
+        return []
+
+
+def create_signed_asset_url(storage_bucket: str, storage_path: str, expires_in: int = 3600) -> Optional[str]:
+    if not supabase or not storage_path:
+        return None
+    try:
+        signed = supabase.storage.from_(storage_bucket).create_signed_url(storage_path, expires_in)
+        if isinstance(signed, dict):
+            return signed.get("signedURL") or signed.get("signedUrl")
+        return None
+    except Exception as e:
+        print("SIGNED_URL_ERROR:", repr(e))
+        return None
+
+
+def get_signed_teaching_assets(
+    board: str,
+    class_level: str,
+    subject: str,
+    chapter_title: str,
+    part_no: int,
+    asset_role: Optional[str] = None,
+    asset_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    rows = get_teaching_assets_from_db(
+        board=board,
+        class_level=class_level,
+        subject=subject,
+        chapter_title=chapter_title,
+        part_no=part_no,
+        asset_role=asset_role,
+        asset_type=asset_type,
+    )
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        out.append(
+            {
+                "id": row.get("id"),
+                "asset_type": row.get("asset_type"),
+                "asset_role": row.get("asset_role"),
+                "sort_order": row.get("sort_order"),
+                "file_name": row.get("file_name"),
+                "mime_type": row.get("mime_type"),
+                "duration_seconds": row.get("duration_seconds"),
+                "storage_bucket": row.get("storage_bucket"),
+                "storage_path": row.get("storage_path"),
+                "signed_url": create_signed_asset_url(
+                    storage_bucket=row.get("storage_bucket", "gurukulai-private"),
+                    storage_path=row.get("storage_path", ""),
+                    expires_in=3600,
+                ),
+            }
+        )
+    return out
+
+
 # =========================================================
 # State / Memory Helpers
 # =========================================================
@@ -666,12 +869,8 @@ def mix_line_for_language(language: str, key: str) -> str:
     return LANGUAGE_MIX_LINES.get(language, LANGUAGE_MIX_LINES.get("English", {})).get(key, "")
 
 
-def react_to_name(name: str) -> str:
-    return random.choice([
-        f"Very nice, {name}. That is a lovely name.",
-        f"Aha, {name}. Beautiful name.",
-        f"Nice to meet you properly, {name}.",
-    ])
+def react_to_name(name: str, state: Dict[str, Any]) -> str:
+    return pick_varied_line(state, "name_reaction", name=name)
 
 
 def build_mic_instruction(language: str) -> str:
@@ -710,10 +909,6 @@ def build_mic_understanding_prompt(language: str) -> str:
     if language == "Hinglish":
         return "Samajh aaya? Agar chaho to main isko kisi aur language mein bhi repeat kar sakti hoon. Jis language mein tum comfortable ho, main usko note kar loongi."
     return "Did you understand that? If you want, I can repeat it in another language too. Whichever language feels comfortable to you, I will note it."
-
-
-def build_intro_reaction_then_followup(state: Dict[str, Any], student_text: str) -> str:
-    return "I like the way you said that."
 
 
 def build_subject_discussion(subject_value: str, pref: str) -> str:
@@ -917,26 +1112,29 @@ def react_to_interest(state: Dict[str, Any], student_text: str) -> Optional[str]
     for food in FOOD_FACTS:
         if re.search(rf"\b{re.escape(food)}\b", low) and not intro_memory.get(f"reacted_food_{food}"):
             intro_memory[f"reacted_food_{food}"] = True
-            return f"Ah, {food} - that is such a lovely choice. {FOOD_FACTS[food]}"
+            line = pick_varied_line(state, "food_reaction", item=food)
+            return varied_join(line, FOOD_FACTS[food])
 
     if raw and intro_memory.get("last_topic") == "favorite_food":
-        return f"{raw} sounds tasty. Food choices tell a lot about what makes us happy."
+        return pick_varied_line(state, "food_reaction", item=raw)
 
     for sport in SPORT_FACTS:
         if re.search(rf"\b{re.escape(sport)}\b", low) and not intro_memory.get(f"reacted_sport_{sport}"):
             intro_memory[f"reacted_sport_{sport}"] = True
-            return f"Very nice, {sport}. {SPORT_FACTS[sport]}"
+            line = pick_varied_line(state, "sport_reaction", item=sport)
+            return varied_join(line, SPORT_FACTS[sport])
 
     if raw and intro_memory.get("last_topic") == "favorite_sport":
-        return f"{raw} sounds fun and energetic. Games often show our natural style and confidence."
+        return pick_varied_line(state, "sport_reaction", item=raw)
 
     hobby = detect_hobby(student_text)
     if hobby and not intro_memory.get(f"reacted_hobby_{hobby}"):
         intro_memory[f"reacted_hobby_{hobby}"] = True
-        return f"That is beautiful. {hobby.title()} suits you. {HOBBY_FACTS.get(hobby, '')}".strip()
+        line = pick_varied_line(state, "hobby_reaction", item=hobby.title())
+        return varied_join(line, HOBBY_FACTS.get(hobby, ""))
 
     if raw and intro_memory.get("last_topic") == "favorite_hobby":
-        return f"{raw} sounds lovely. Hobbies tell me how your mind enjoys itself outside studies."
+        return pick_varied_line(state, "hobby_reaction", item=raw)
 
     subject = detect_favorite_subject(student_text)
     if subject and not intro_memory.get(f"reacted_subject_{subject}"):
@@ -947,11 +1145,11 @@ def react_to_interest(state: Dict[str, Any], student_text: str) -> Optional[str]
         return build_subject_discussion(raw, pref)
 
     if has_word(low, "mother") or has_word(low, "mom") or has_word(low, "mummy"):
-        return "That is very sweet. Mothers often understand us deeply."
+        return varied_join(pick_varied_line(state, "family_reaction"), "Mothers often understand us deeply.")
     if has_word(low, "father") or has_word(low, "dad") or has_word(low, "papa"):
-        return "That is lovely. Fathers also show love in their own caring way."
+        return varied_join(pick_varied_line(state, "family_reaction"), "Fathers also show love in their own caring way.")
     if has_word(low, "grandmother") or has_word(low, "grandma") or has_word(low, "dida") or has_word(low, "nani"):
-        return "That is beautiful. Grandmothers bring so much warmth and love."
+        return varied_join(pick_varied_line(state, "family_reaction"), "Grandmothers bring so much warmth and love.")
 
     return None
 
@@ -961,38 +1159,105 @@ def react_to_interest(state: Dict[str, Any], student_text: str) -> Optional[str]
 # =========================================================
 def build_story_from_student_memory(state: Dict[str, Any], chapter: str, subject: str) -> List[str]:
     student_memory = state.get("student_memory", {}) or {}
-    favorite_food = student_memory.get("favorite_food") or "mango"
-    favorite_sport = student_memory.get("favorite_sport") or "cricket"
-    favorite_hobby = student_memory.get("favorite_hobby") or "stories"
-    other_interest = student_memory.get("other_interest") or "nature"
+    favorite_food = student_memory.get("favorite_food") or random.choice(["mango", "rice", "dal", "banana"])
+    favorite_sport = student_memory.get("favorite_sport") or random.choice(["cricket", "football", "badminton"])
+    favorite_hobby = student_memory.get("favorite_hobby") or random.choice(["stories", "drawing", "reading"])
+    other_interest = student_memory.get("other_interest") or random.choice(["nature", "space", "music"])
     family_context = student_memory.get("family_context", {}) or {}
-    who_loves = family_context.get("who_loves_you_more") or "someone at home"
-    cook_person = family_context.get("who_cooks") or "someone at home"
+    who_loves = family_context.get("who_loves_you_more") or random.choice(["someone at home", "your mother", "your father"])
+    cook_person = family_context.get("who_cooks") or random.choice(["someone at home", "your mother", "a loving family member"])
     pref = preferred_explanation_style(state)
 
-    lines = [
+    opening_variants = [
         "Before we start the chapter, let me take you into a small real-life story.",
+        "Before opening the chapter, let me tell you a little story from daily life.",
+        "Let us begin with a short life-connected story before we study the chapter.",
+        "First, I want to bring you into a simple story that feels close to life.",
+    ]
+
+    home_variants = [
         f"Imagine one day after school, you come home and see your favorite {favorite_food} waiting for you.",
+        f"Picture yourself returning home and noticing your favorite {favorite_food} ready for you.",
+        f"Think of an evening when you come home and your favorite {favorite_food} makes you smile instantly.",
+    ]
+
+    sport_variants = [
         f"Your mind is still half inside {favorite_sport}, because that is something you really enjoy.",
+        f"Even then, part of your mind is still thinking about {favorite_sport}, because you enjoy it so much.",
+        f"And somewhere inside, your thoughts are still running around {favorite_sport}, which you really love.",
+    ]
+
+    family_variants = [
         f"Then someone like {who_loves} smiles at you, and the whole house feels warm and safe.",
+        f"Then {who_loves} looks at you with care, and suddenly the whole place feels softer.",
+        f"Then a loving face like {who_loves} makes the moment feel peaceful and warm.",
+    ]
+
+    food_variants = [
         f"You remember that food is often made with care by {cook_person}.",
+        f"You suddenly feel how much care goes into food when it is prepared by {cook_person}.",
+        f"And you quietly realize that food carries love when it comes from {cook_person}.",
+    ]
+
+    reflection_variants = [
         f"After a while, you sit quietly and think about {favorite_hobby} and {other_interest}.",
+        f"Then your thoughts wander toward {favorite_hobby} and {other_interest}, the things that interest you naturally.",
+        f"For a moment, your mind drifts toward {favorite_hobby} and also toward {other_interest}.",
+    ]
+
+    leaf_variants = [
         "Then your eyes go toward a green leaf outside the window.",
+        "Then, outside the window, a green leaf quietly catches your eye.",
+        "Then you notice a green leaf outside, still and shining.",
+    ]
+
+    question_variants = [
+        "We wait for food at home, but how does a plant prepare its own food?",
+        "At home, food comes with care - but how does a plant make its own food?",
+        "Humans receive food from others, but how does a plant prepare food for itself?",
+    ]
+
+    ending_variants = [
+        f"So this chapter is not just about dry {subject}.",
+        f"So this lesson is not just about textbook {subject}.",
+        f"So this chapter is much more than only {subject} facts.",
+    ]
+
+    lines = [
+        random.choice(opening_variants),
+        random.choice(home_variants),
+        random.choice(sport_variants),
+        random.choice(family_variants),
+        random.choice(food_variants),
+        random.choice(reflection_variants),
+        random.choice(leaf_variants),
         "It is shining softly in sunlight.",
         "And a beautiful question comes to your mind.",
-        "We wait for food at home, but how does a plant prepare its own food?",
+        random.choice(question_variants),
         "That one question slowly opens the door to today’s chapter.",
-        f"So this chapter is not just about dry {subject}.",
+        random.choice(ending_variants),
         "It is about life, care, sunlight, food, and hidden intelligence.",
         "A leaf looks silent, but inside it, something magical is happening all the time.",
     ]
 
     if pref == "Bengali":
-        lines.insert(1, "Ektu bhebo, jiboner chhoto chhoto jinisher moddheo onek boro golpo lukiye thake.")
-        lines.append("Tai aaj amra chapter ta golper moto kore bujhbo.")
+        lines.insert(1, random.choice([
+            "Ektu bhebo, jiboner chhoto chhoto jinisher moddheo onek boro golpo lukiye thake.",
+            "Chhoto everyday moment-er moddheo onek boro golpo thake, tai na?",
+        ]))
+        lines.append(random.choice([
+            "Tai aaj amra chapter ta golper moto kore bujhbo.",
+            "Aaj chapter-ta amra ekta golper bhitore diye bujhbo.",
+        ]))
     elif pref in ["Hindi", "Hinglish"]:
-        lines.insert(1, "Zara socho, daily life ki simple cheezon ke andar bhi kitni interesting story chhupi hoti hai.")
-        lines.append("Aaj hum chapter ko real life story ke through samjhenge.")
+        lines.insert(1, random.choice([
+            "Zara socho, daily life ki simple cheezon ke andar bhi kitni interesting story chhupi hoti hai.",
+            "Socho, roz ki zindagi ke chhote moments ke andar bhi kitni gehri story hoti hai.",
+        ]))
+        lines.append(random.choice([
+            "Aaj hum chapter ko real life story ke through samjhenge.",
+            "Aaj hum is lesson ko life-connected story ke saath samjhenge.",
+        ]))
 
     return lines
 
@@ -1100,9 +1365,33 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
     teacher_text = re.sub(r"\s+", " ", teacher_text).strip()
     append_history(state, "teacher", teacher_text)
     save_live_session(state)
+
     meta = meta or {}
     preferred_lang = preferred_explanation_style(state)
     meta["speech_text"] = speech_text(teacher_text, preferred_lang)
+
+    current_part = int(state.get("part_no", 1))
+    current_phase = state.get("phase", "INTRO")
+
+    asset_role_map = {
+        "INTRO": "intro",
+        "STORY": "story_chunk",
+        "TEACH": "teach_chunk",
+        "QUIZ": "quiz_visual",
+        "HOMEWORK": "homework",
+        "DONE": "recap",
+    }
+
+    meta["assets"] = get_signed_teaching_assets(
+        board=state["board"],
+        class_level=state["class_name"],
+        subject=state["subject"],
+        chapter_title=state["chapter"],
+        part_no=current_part,
+        asset_role=asset_role_map.get(current_phase),
+    )
+    meta["part_no"] = current_part
+    meta["phase"] = current_phase
 
     return TurnResponse(
         ok=True,
@@ -1128,9 +1417,8 @@ def make_turn(state: Dict[str, Any], teacher_text: str, awaiting_user: bool, don
             "badges": list(state.get("badges", [])),
             "quiz_total": int(state.get("quiz_total", 0)),
             "quiz_correct": int(state.get("quiz_correct", 0)),
-            "percentage": int(
-                (int(state.get("quiz_correct", 0)) / max(1, int(state.get("quiz_total", 0)))) * 100
-            ) if int(state.get("quiz_total", 0)) > 0 else 0,
+            "percentage": int((int(state.get("quiz_correct", 0)) / max(1, int(state.get("quiz_total", 0)))) * 100)
+            if int(state.get("quiz_total", 0)) > 0 else 0,
         },
     )
 
@@ -1197,7 +1485,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             or "English"
         )
 
-        parts = [react_to_name(parsed_name)]
+        parts = [react_to_name(parsed_name, state)]
 
         if guessed:
             parts.append(f"I also get a small feeling that {guessed} may sound familiar to you.")
@@ -1249,12 +1537,7 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             intro["mic_confirmed"] = True
             next_prompt = next_intro_prompt(state)
             if next_prompt:
-                return make_turn(
-                    state,
-                    f"Wonderful. Then we will continue comfortably. {next_prompt}",
-                    True,
-                    False,
-                )
+                return make_turn(state, f"Wonderful. Then we will continue comfortably. {next_prompt}", True, False)
 
         if detect_negative_signal(student_text):
             lang = (
@@ -1287,10 +1570,10 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
                 state.get("subject", ""),
             )
 
-        preface = (
-            f"{interest_reaction} "
-            f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
-            "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
+        preface = varied_join(
+            interest_reaction,
+            mix_line_for_language(pref, "start") or pick_varied_line(state, "transition_to_story"),
+            pick_varied_line(state, "story_intro"),
         )
         return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
 
@@ -1325,9 +1608,9 @@ def answer_during_intro(state: Dict[str, Any], student_text: str, req: RespondRe
             state.get("subject", ""),
         )
 
-    preface = (
-        f"{mix_line_for_language(pref, 'start') or 'Now let us get into today’s chapter.'} "
-        "First I will tell you a meaningful story connected to your life, and then we will enter the chapter softly."
+    preface = varied_join(
+        mix_line_for_language(pref, "start") or pick_varied_line(state, "transition_to_story"),
+        pick_varied_line(state, "story_intro"),
     )
     return make_turn(state, preface, False, False, {"resume_phase": "STORY"})
 
@@ -1389,12 +1672,7 @@ def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
 
     state["quiz_index"] = idx + 1
     if state["quiz_index"] < len(questions):
-        return make_turn(
-            state,
-            f"{feedback} Next question: {questions[state['quiz_index']]['question']}",
-            True,
-            False,
-        )
+        return make_turn(state, f"{feedback} Next question: {questions[state['quiz_index']]['question']}", True, False)
 
     state["phase"] = "HOMEWORK"
     return make_turn(state, feedback + " Quiz complete.", False, False)
@@ -1402,12 +1680,7 @@ def answer_during_quiz(state: Dict[str, Any], text: str) -> TurnResponse:
 
 def answer_during_homework(state: Dict[str, Any], text: str) -> TurnResponse:
     state["phase"] = "DONE"
-    return make_turn(
-        state,
-        "Wonderful. We are done for today. Revise the chapter once and complete the homework.",
-        False,
-        True,
-    )
+    return make_turn(state, "Wonderful. We are done for today. Revise the chapter once and complete the homework.", False, True)
 
 
 def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
@@ -1419,13 +1692,7 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
         if idx < len(chunks):
             state["intro_index"] = idx + 1
             return make_turn(state, chunks[idx], True, False, {"intro_index": idx})
-        return make_turn(
-            state,
-            "Tell me your full name once nicely.",
-            True,
-            False,
-            {"intro_index": idx},
-        )
+        return make_turn(state, "Tell me your full name once nicely.", True, False, {"intro_index": idx})
 
     if phase == "STORY":
         idx = int(state.get("story_index", 0))
@@ -1453,13 +1720,7 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
         idx = int(state.get("quiz_index", 0))
         questions = state.get("quiz_questions", [])
         if idx < len(questions):
-            return make_turn(
-                state,
-                f"Quiz time. {questions[idx]['question']}",
-                True,
-                False,
-                {"quiz_index": idx},
-            )
+            return make_turn(state, f"Quiz time. {questions[idx]['question']}", True, False, {"quiz_index": idx})
 
         state["phase"] = "HOMEWORK"
         return serve_next_auto_turn(state)
@@ -1467,19 +1728,9 @@ def serve_next_auto_turn(state: Dict[str, Any]) -> TurnResponse:
     if phase == "HOMEWORK":
         items = state.get("homework_items", [])
         state["phase"] = "DONE"
-        return make_turn(
-            state,
-            "Great work today. Your homework is: " + " ".join(items),
-            False,
-            True,
-        )
+        return make_turn(state, "Great work today. Your homework is: " + " ".join(items), False, True)
 
-    return make_turn(
-        state,
-        "This session is complete. Press Start Class to begin a new lesson.",
-        False,
-        True,
-    )
+    return make_turn(state, "This session is complete. Press Start Class to begin a new lesson.", False, True)
 
 
 # =========================================================
@@ -1494,6 +1745,63 @@ def health():
         "openai_enabled": bool(openai_client),
         "openai_model": OPENAI_MODEL if openai_client else None,
         "elevenlabs_enabled": bool(ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID),
+    }
+
+
+@app.get("/assets/preview")
+def preview_assets(
+    board: str,
+    class_level: int,
+    subject: str,
+    chapter_title: str,
+    part_no: int = 1,
+    asset_role: Optional[str] = None,
+    asset_type: Optional[str] = None,
+):
+    assets = get_signed_teaching_assets(
+        board=board,
+        class_level=str(class_level),
+        subject=subject,
+        chapter_title=chapter_title,
+        part_no=part_no,
+        asset_role=asset_role,
+        asset_type=asset_type,
+    )
+    return {"ok": True, "count": len(assets), "assets": assets}
+
+
+@app.get("/teaching-assets/{session_id}")
+def fetch_teaching_assets(
+    session_id: str,
+    part_no: Optional[int] = None,
+    asset_role: Optional[str] = None,
+    asset_type: Optional[str] = None,
+):
+    state = get_live_state(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    target_part = int(part_no or state.get("part_no", 1))
+    assets = get_signed_teaching_assets(
+        board=state["board"],
+        class_level=state["class_name"],
+        subject=state["subject"],
+        chapter_title=state["chapter"],
+        part_no=target_part,
+        asset_role=asset_role,
+        asset_type=asset_type,
+    )
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "board": state["board"],
+        "class_name": state["class_name"],
+        "subject": state["subject"],
+        "chapter": state["chapter"],
+        "part_no": target_part,
+        "count": len(assets),
+        "assets": assets,
     }
 
 
