@@ -1,3 +1,4 @@
+
 import os
 import re
 import json
@@ -5,6 +6,7 @@ import time
 import uuid
 import random
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query
@@ -37,7 +39,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # APP
 # =========================================================
 
-app = FastAPI(title="GurukulAI Backend", version="4.2.0")
+app = FastAPI(title="GurukulAI Backend", version="4.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,6 +58,68 @@ SESSION_STORE: Dict[str, Dict[str, Any]] = {}
 
 
 # =========================================================
+# LANGUAGE / PRONUNCIATION CONFIG
+# =========================================================
+
+NON_NAME_WORDS = {
+    "mango", "rice", "mother", "father", "myself", "me", "math", "maths", "mathematics",
+    "science", "english", "hindi", "bengali", "hinglish", "tamil", "telugu", "marathi",
+    "punjabi", "gujarati", "odia", "malayalam", "kannada", "urdu", "class", "student",
+    "boy", "girl", "yes", "no", "ok", "okay", "ready"
+}
+
+TECHNICAL_TERMS = [
+    "addition", "subtraction", "multiplication", "division", "fraction", "decimal",
+    "percentage", "ratio", "proportion", "algebra", "geometry", "equation", "variable",
+    "integer", "triangle", "circle", "perimeter", "area", "volume", "force", "energy",
+    "matter", "atom", "molecule", "cell", "photosynthesis", "gravity", "evaporation",
+    "condensation", "democracy", "constitution", "noun", "verb", "adjective", "phonics",
+    "biology", "chemistry", "physics"
+]
+
+ROMANIZED_LANGUAGE_MARKERS = {
+    "kya", "kyun", "kyoki", "kyunki", "samjho", "samajho", "achha", "accha", "dekho",
+    "sunno", "suno", "bolo", "chalo", "aaj", "kal", "yahaan", "yahan", "vahaan", "wahan",
+    "bahut", "thoda", "zaroor", "jaldi", "dhyaan", "dhyan", "sahi", "galat", "bachcho",
+    "baccho", "dosto", "isse", "waise", "aisa", "vaisa", "hum", "tum", "aap"
+}
+
+PRONUNCIATION_REPLACEMENTS = [
+    (r"\bMaths\b", "Mathematics"),
+    (r"\bmaths\b", "mathematics"),
+    (r"\bAI\b", "A I"),
+    (r"\bCBSE\b", "C B S E"),
+    (r"\bICSE\b", "I C S E"),
+    (r"\bNCERT\b", "N C E R T"),
+    (r"\bLCM\b", "L C M"),
+    (r"\bHCF\b", "H C F"),
+    (r"\bGCD\b", "G C D"),
+    (r"\bDNA\b", "D N A"),
+    (r"\bRNA\b", "R N A"),
+    (r"\bPDF\b", "P D F"),
+    (r"\bkg\b", "kilogram"),
+    (r"\bcm\b", "centimeter"),
+    (r"\bkm\b", "kilometer"),
+    (r"\bmm\b", "millimeter"),
+    (r"\bm/s\b", "meter per second"),
+]
+
+EXAMPLE_PREFIXES = [
+    "Here is an easy example.",
+    "Let us take a simple real-life example.",
+    "Now think of it this way.",
+    "Let us understand this with a small situation.",
+]
+
+SUMMARY_PREFIXES = [
+    "Let us quickly revise.",
+    "Here is the short recap.",
+    "Now let us summarize the main points.",
+    "Let us do a quick revision.",
+]
+
+
+# =========================================================
 # GENERIC HELPERS
 # =========================================================
 
@@ -69,11 +133,14 @@ def safe_str(value: Any) -> str:
     return str(value).strip()
 
 
+def normalize_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", safe_str(value)).strip()
+
+
 def normalize_teacher_name(value: str) -> str:
-    name = safe_str(value)
+    name = normalize_spaces(value)
     name = re.sub(r"^\s*dr\.?\s+", "", name, flags=re.IGNORECASE)
-    name = re.sub(r"\s+", " ", name).strip()
-    return name
+    return normalize_spaces(name)
 
 
 def slugify(value: str) -> str:
@@ -96,12 +163,13 @@ def unique_keep_order(items: List[Any]) -> List[Any]:
 
 
 def choose_non_repetitive(options: List[str], used: List[str], fallback: str) -> str:
-    remaining = [x for x in options if x not in used]
+    clean = [safe_str(x) for x in options if safe_str(x)]
+    if not clean:
+        return fallback
+    remaining = [x for x in clean if x not in used]
     if not remaining:
         used.clear()
-        remaining = options[:]
-    if not remaining:
-        return fallback
+        remaining = clean[:]
     picked = random.choice(remaining)
     used.append(picked)
     return picked
@@ -125,6 +193,15 @@ def build_storage_prefix(
     if part:
         parts.append(slugify(part))
     return "/".join([p for p in parts if p])
+
+
+def get_time_greeting() -> str:
+    hour = datetime.now().hour
+    if hour < 12:
+        return "Good morning!"
+    if hour < 17:
+        return "Good afternoon!"
+    return "Good evening!"
 
 
 # =========================================================
@@ -173,6 +250,59 @@ def wants_summary(text: str) -> bool:
 def wants_assets(text: str) -> bool:
     x = safe_str(text).lower()
     return any(k in x for k in ["diagram", "image", "video", "show", "picture", "asset"])
+
+
+# =========================================================
+# NAME / INTRO HELPERS
+# =========================================================
+
+def is_probable_student_name(text: str) -> bool:
+    x = normalize_spaces(text)
+    if not x:
+        return False
+    if len(x.split()) > 4:
+        return False
+    if any(ch.isdigit() for ch in x):
+        return False
+
+    lowered = x.lower()
+    if lowered in NON_NAME_WORDS:
+        return False
+
+    words = re.findall(r"[A-Za-z]+", x)
+    if not words:
+        return False
+
+    for word in words:
+        if word.lower() in NON_NAME_WORDS:
+            return False
+
+    return True
+
+
+def extract_student_name(text: str) -> str:
+    x = normalize_spaces(text)
+    if not x:
+        return ""
+
+    patterns = [
+        r"my name is\s+([A-Za-z ]{2,40})$",
+        r"i am\s+([A-Za-z ]{2,40})$",
+        r"i'm\s+([A-Za-z ]{2,40})$",
+        r"this is\s+([A-Za-z ]{2,40})$",
+    ]
+    lowered = x.lower()
+    for pat in patterns:
+        m = re.search(pat, lowered, flags=re.IGNORECASE)
+        if m:
+            candidate = normalize_spaces(m.group(1))
+            if is_probable_student_name(candidate):
+                return " ".join(w.capitalize() for w in candidate.split())
+
+    if is_probable_student_name(x):
+        return " ".join(w.capitalize() for w in x.split())
+
+    return ""
 
 
 # =========================================================
@@ -234,6 +364,23 @@ def get_part_interaction_data(part_row: Optional[Dict[str, Any]]) -> Dict[str, A
     }
 
 
+def choose_part_prompt(items: Any, fallback: str = "") -> str:
+    if isinstance(items, list):
+        clean = [safe_str(x.get("text") if isinstance(x, dict) else x) for x in items]
+        clean = [x for x in clean if x]
+        if clean:
+            return random.choice(clean)
+    elif isinstance(items, dict):
+        text = safe_str(items.get("text"))
+        if text:
+            return text
+    elif isinstance(items, str):
+        text = safe_str(items)
+        if text:
+            return text
+    return fallback
+
+
 # =========================================================
 # TONE / AGE HELPERS
 # =========================================================
@@ -257,6 +404,181 @@ def get_random_teaching_style(class_level: int) -> str:
     if band == "middle":
         return random.choice(["clear", "coach", "story"])
     return random.choice(["mature", "exam", "coach"])
+
+
+def choose_teaching_style(class_level: int) -> str:
+    return get_random_teaching_style(class_level)
+
+
+def get_brain_profile(class_level: int) -> Dict[str, Any]:
+    band = get_age_band(class_level)
+    if band == "tiny":
+        return {
+            "band": band,
+            "intro_bank": [
+                f"{get_time_greeting()} Welcome, my little learner.",
+                f"{get_time_greeting()} I am happy to learn with you.",
+                f"{get_time_greeting()} Let us learn together in a fun way.",
+            ],
+            "question_bank": [
+                "Are you ready to start?",
+                "Shall we begin gently?",
+                "Are you excited to learn today?",
+            ],
+            "praise_bank": [
+                "Very good!",
+                "Wonderful try!",
+                "You are doing nicely.",
+            ],
+            "transition_bank": [
+                "Now let us see the next small idea.",
+                "Let us go step by step.",
+                "Now we learn one more little thing.",
+            ],
+        }
+    if band == "young":
+        return {
+            "band": band,
+            "intro_bank": [
+                f"{get_time_greeting()} Welcome back.",
+                f"{get_time_greeting()} Happy to see you.",
+                f"{get_time_greeting()} Let us learn together.",
+            ],
+            "question_bank": [
+                "Ready to begin?",
+                "Shall we start now?",
+                "Can we move into the chapter?",
+            ],
+            "praise_bank": [
+                "Good job.",
+                "Nice effort.",
+                "Well done.",
+            ],
+            "transition_bank": [
+                "Now let us move to the next point.",
+                "Let us understand the next step.",
+                "Now we will build the idea clearly.",
+            ],
+        }
+    if band == "middle":
+        return {
+            "band": band,
+            "intro_bank": [
+                f"{get_time_greeting()} Welcome.",
+                f"{get_time_greeting()} Let us focus and learn well.",
+                f"{get_time_greeting()} We are ready to study clearly today.",
+            ],
+            "question_bank": [
+                "Are you ready to start?",
+                "Shall we begin with the concept?",
+                "Can we start the chapter?",
+            ],
+            "praise_bank": [
+                "Good thinking.",
+                "That is a strong attempt.",
+                "Nicely answered.",
+            ],
+            "transition_bank": [
+                "Now let us connect this to the next idea.",
+                "Next, focus on this important point.",
+                "Let us continue carefully.",
+            ],
+        }
+    return {
+        "band": band,
+        "intro_bank": [
+            f"{get_time_greeting()} Welcome.",
+            f"{get_time_greeting()} Let us begin.",
+            f"{get_time_greeting()} Time to study with clarity.",
+        ],
+        "question_bank": [
+            "Are you ready to continue?",
+            "Shall we start with the concept?",
+            "Ready for the explanation?",
+        ],
+        "praise_bank": [
+            "Good.",
+            "Strong attempt.",
+            "That is a thoughtful response.",
+        ],
+        "transition_bank": [
+            "Now let us move to the next point.",
+            "Next, observe this carefully.",
+            "Let us continue in a structured way.",
+        ],
+    }
+
+
+# =========================================================
+# PRONUNCIATION / SPEECH TEXT HELPERS
+# =========================================================
+
+def detect_language_mode(text: str, base_language: str = "") -> str:
+    lowered = safe_str(text).lower()
+    base = safe_str(base_language).lower()
+    has_devanagari = bool(re.search(r"[\u0900-\u097F]", text))
+    has_romanized = any(word in lowered for word in ROMANIZED_LANGUAGE_MARKERS)
+
+    if has_devanagari:
+        return "hindi_script"
+    if "hinglish" in base or (base in {"hindi", "bengali", "tamil", "telugu", "marathi", "punjabi"} and has_romanized):
+        return "regional_mixed"
+    if has_romanized:
+        return "regional_mixed"
+    return "english"
+
+
+def protect_technical_terms(text: str) -> str:
+    result = safe_str(text)
+    for term in TECHNICAL_TERMS:
+        pattern = re.compile(rf"\b{re.escape(term)}\b", flags=re.IGNORECASE)
+        result = pattern.sub(term, result)
+    return result
+
+
+def normalize_visible_teacher_text(text: str) -> str:
+    text = safe_str(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+    return text
+
+
+def normalize_tts_text(text: str, base_language: str = "", accent_style: str = "") -> str:
+    out = normalize_visible_teacher_text(text)
+    out = protect_technical_terms(out)
+
+    for pattern, repl in PRONUNCIATION_REPLACEMENTS:
+        out = re.sub(pattern, repl, out)
+
+    mode = detect_language_mode(out, base_language)
+
+    # Keep technical words in English while making mixed-language text easier for TTS.
+    if mode in {"regional_mixed", "hindi_script"}:
+        out = out.replace(" / ", " or ")
+        out = re.sub(r"\bplus\b", " plus ", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bminus\b", " minus ", out, flags=re.IGNORECASE)
+        out = re.sub(r"\btimes\b", " multiplied by ", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bdivided by\b", " divided by ", out, flags=re.IGNORECASE)
+
+    # Give ElevenLabs cleaner pauses.
+    out = re.sub(r"\(", ", ", out)
+    out = re.sub(r"\)", ", ", out)
+    out = re.sub(r"\s+-\s+", ". ", out)
+    out = re.sub(r":", ". ", out)
+    out = re.sub(r";", ". ", out)
+    out = re.sub(r"\s+", " ", out).strip()
+
+    # Avoid long symbol-heavy speech.
+    out = out.replace("%", " percent")
+    out = out.replace("=", " equals ")
+    out = out.replace("+", " plus ")
+    out = out.replace("*", " multiplied by ")
+    out = out.replace("/", " by ")
+
+    if safe_str(accent_style).lower() == "indian":
+        out = out.replace("schedule", "shedyool")
+
+    return normalize_visible_teacher_text(out)
 
 
 # =========================================================
@@ -691,6 +1013,95 @@ def move_previous_chunk(chunks: List[Dict[str, Any]], session: Dict[str, Any]) -
 
 
 # =========================================================
+# CONTENT / RESPONSE HELPERS
+# =========================================================
+
+def rewrite_for_class_level(raw: str, class_level: int, chapter_title: str = "") -> str:
+    text = normalize_visible_teacher_text(raw)
+    if not text:
+        return ""
+
+    if class_level <= 2:
+        return f"{text} I will explain it in a very easy way."
+    if class_level <= 5:
+        return f"{text} Let us understand it step by step."
+    if class_level <= 8:
+        return text
+    return text
+
+
+def evaluate_student_response(student_message: str, answer_key: List[Any]) -> str:
+    text = safe_str(student_message).lower()
+    if not text:
+        return "wrong"
+
+    if len(text.split()) <= 2 and text in {"yes", "no", "ok", "okay", "ready"}:
+        return "partial"
+
+    for item in answer_key or []:
+        if isinstance(item, dict):
+            answer = safe_str(item.get("answer")).lower()
+            keywords = [safe_str(x).lower() for x in item.get("keywords", []) if safe_str(x)]
+            if answer and answer in text:
+                return "correct"
+            if keywords and any(k in text for k in keywords):
+                return "partial"
+
+    if len(text.split()) >= 4:
+        return "partial"
+    return "wrong"
+
+
+def find_answer_key_match(answer_key: List[Any], student_message: str) -> Optional[Dict[str, Any]]:
+    text = safe_str(student_message).lower()
+    for item in answer_key or []:
+        if isinstance(item, dict):
+            answer = safe_str(item.get("answer")).lower()
+            keywords = [safe_str(x).lower() for x in item.get("keywords", []) if safe_str(x)]
+            if (answer and answer in text) or (keywords and any(k in text for k in keywords)):
+                return item
+    return None
+
+
+# =========================================================
+# SESSION HELPERS
+# =========================================================
+
+def ensure_session(session_id: Optional[str]) -> Tuple[str, Dict[str, Any]]:
+    if session_id and session_id in SESSION_STORE:
+        return session_id, SESSION_STORE[session_id]
+
+    new_id = session_id or str(uuid.uuid4())
+    if new_id not in SESSION_STORE:
+        SESSION_STORE[new_id] = {
+            "session_id": new_id,
+            "student_name": "",
+            "board": "",
+            "class_level": 0,
+            "subject": "",
+            "book": "",
+            "chapter": "",
+            "teaching_style": "clear",
+            "current_chunk_index": 0,
+            "current_part_index": 0,
+            "teacher_name": "",
+            "teacher_code": "",
+            "teacher_voice_provider": "",
+            "teacher_voice_id": "",
+            "teacher_base_language": "",
+            "teacher_accent_style": "",
+            "used_greetings": [],
+            "used_questions": [],
+            "used_praises": [],
+            "used_transitions": [],
+            "used_example_prefixes": [],
+            "used_summary_prefixes": [],
+            "history": [],
+        }
+    return new_id, SESSION_STORE[new_id]
+
+
+# =========================================================
 # TEACHING TEXT BUILDERS
 # =========================================================
 
@@ -859,6 +1270,19 @@ def build_asset_response(session: Dict[str, Any], bundle: Dict[str, Any]) -> str
     return f"{transition} I found a {sample.get('type')} asset for this chapter. The frontend can use the signed URL."
 
 
+def build_teacher_output(session: Dict[str, Any], visible_text: str) -> Dict[str, str]:
+    visible_text = normalize_visible_teacher_text(visible_text)
+    speech_text = normalize_tts_text(
+        visible_text,
+        base_language=safe_str(session.get("teacher_base_language")),
+        accent_style=safe_str(session.get("teacher_accent_style")),
+    )
+    return {
+        "teacher_text": visible_text,
+        "teacher_speech_text": speech_text,
+    }
+
+
 # =========================================================
 # MODELS
 # =========================================================
@@ -928,7 +1352,8 @@ def get_chapter_bundle(req: ChapterBundleRequest):
 def start_session(req: StartSessionRequest):
     session_id, session = ensure_session(None)
 
-    session["student_name"] = safe_str(req.student_name)
+    extracted_name = extract_student_name(req.student_name)
+    session["student_name"] = extracted_name or safe_str(req.student_name)
     session["board"] = req.board
     session["class_level"] = req.class_level
     session["subject"] = req.subject
@@ -962,17 +1387,18 @@ def start_session(req: StartSessionRequest):
     teaching = build_part1_live_teaching_text(session, bundle, current_chunk)
 
     if req.class_level <= 2:
-        teacher_text = f"{intro} Today we will learn {req.chapter}. {teaching}"
+        visible_teacher_text = f"{intro} Today we will learn {req.chapter}. {teaching}"
     elif req.class_level <= 5:
-        teacher_text = f"{intro} Today we are learning {req.chapter}. {teaching}"
+        visible_teacher_text = f"{intro} Today we are learning {req.chapter}. {teaching}"
     else:
-        teacher_text = f"{intro} Today we are studying {req.book} - {req.chapter}. {teaching}"
+        visible_teacher_text = f"{intro} Today we are studying {req.book} - {req.chapter}. {teaching}"
 
-    session["history"].append({"role": "teacher", "text": teacher_text, "ts": now_ts()})
+    output = build_teacher_output(session, visible_teacher_text)
+    session["history"].append({"role": "teacher", "text": output["teacher_text"], "speech_text": output["teacher_speech_text"], "ts": now_ts()})
 
     return {
         "session_id": session_id,
-        "teacher_text": teacher_text,
+        **output,
         "student_profile": {
             "student_name": session["student_name"],
             "board": session["board"],
@@ -1019,6 +1445,10 @@ def respond(req: StudentTurnRequest):
         raise HTTPException(status_code=400, detail="Session is missing board/class_level/subject/book/chapter.")
 
     student_message = req.student_message.strip()
+    inferred_name = extract_student_name(student_message)
+    if inferred_name and not safe_str(session.get("student_name")):
+        session["student_name"] = inferred_name
+
     session["history"].append({"role": "student", "text": student_message, "ts": now_ts()})
 
     bundle = build_teaching_payload(
@@ -1029,51 +1459,62 @@ def respond(req: StudentTurnRequest):
         chapter=session["chapter"],
     )
 
+    teacher_info = bundle.get("teacher", {}) or {}
+    teacher_profile = teacher_info.get("profile", {}) or {}
+    if teacher_profile:
+        session["teacher_name"] = safe_str(teacher_profile.get("teacher_name"))
+        session["teacher_code"] = safe_str(teacher_profile.get("teacher_code"))
+        session["teacher_voice_provider"] = safe_str(teacher_profile.get("voice_provider"))
+        session["teacher_voice_id"] = safe_str(teacher_profile.get("voice_id"))
+        session["teacher_base_language"] = safe_str(teacher_profile.get("base_language"))
+        session["teacher_accent_style"] = safe_str(teacher_profile.get("accent_style"))
+
     chunks = bundle.get("chunks", [])
     current_chunk = get_current_chunk(chunks, session)
 
     if looks_like_yes(student_message):
-        teacher_text = build_part1_live_teaching_text(session, bundle, current_chunk)
+        visible_teacher_text = build_part1_live_teaching_text(session, bundle, current_chunk)
 
     elif looks_like_next(student_message):
         next_chunk, finished = move_next_chunk(chunks, session)
         if finished:
-            teacher_text = build_summary_response(session, bundle, chunks)
+            visible_teacher_text = build_summary_response(session, bundle, chunks)
         else:
-            teacher_text = build_part1_live_teaching_text(session, bundle, next_chunk)
+            visible_teacher_text = build_part1_live_teaching_text(session, bundle, next_chunk)
 
     elif looks_like_previous(student_message):
         prev_chunk, at_start = move_previous_chunk(chunks, session)
         if at_start:
-            teacher_text = f"{build_praise(session)} We are already at the beginning. {build_part1_live_teaching_text(session, bundle, prev_chunk)}"
+            visible_teacher_text = f"{build_praise(session)} We are already at the beginning. {build_part1_live_teaching_text(session, bundle, prev_chunk)}"
         else:
-            teacher_text = build_part1_live_teaching_text(session, bundle, prev_chunk)
+            visible_teacher_text = build_part1_live_teaching_text(session, bundle, prev_chunk)
 
     elif wants_question(student_message):
-        teacher_text = build_part_question_response(session, bundle)
+        visible_teacher_text = build_part_question_response(session, bundle)
 
     elif wants_practice(student_message):
-        teacher_text = build_part_practice_response(session, bundle)
+        visible_teacher_text = build_part_practice_response(session, bundle)
 
     elif wants_example(student_message):
-        teacher_text = build_example_response(session, bundle)
+        visible_teacher_text = build_example_response(session, bundle)
 
     elif wants_summary(student_message):
-        teacher_text = build_summary_response(session, bundle, chunks)
+        visible_teacher_text = build_summary_response(session, bundle, chunks)
 
     elif wants_assets(student_message):
-        teacher_text = build_asset_response(session, bundle)
+        visible_teacher_text = build_asset_response(session, bundle)
 
     else:
         feedback = build_feedback_response(session, student_message, bundle)
-        teacher_text = f"{feedback} {build_part_question_response(session, bundle)}"
+        visible_teacher_text = f"{feedback} {build_part_question_response(session, bundle)}"
 
     current_chunk_after = get_current_chunk(chunks, session)
-    session["history"].append({"role": "teacher", "text": teacher_text, "ts": now_ts()})
+    output = build_teacher_output(session, visible_teacher_text)
+    session["history"].append({"role": "teacher", "text": output["teacher_text"], "speech_text": output["teacher_speech_text"], "ts": now_ts()})
 
     return {
         "session_id": session_id,
-        "teacher_text": teacher_text,
+        **output,
         "teacher_profile": {
             "teacher_name": session.get("teacher_name"),
             "teacher_code": session.get("teacher_code"),
