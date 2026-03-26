@@ -837,8 +837,7 @@ def respond(req: StudentTurnRequest):
     praise = build_praise(session)
 
     if looks_like_yes(student_message):
-        teacher_text = build_chunk_explanation(session, bundle, current_chunk)
-
+        teacher_text = build_summary_response(session, bundle, chunks)
     elif looks_like_next(student_message):
         next_chunk, finished = move_next_chunk(chunks, session)
         if finished:
