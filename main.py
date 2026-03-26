@@ -19,10 +19,8 @@ from supabase import create_client, Client
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-
 TEACHING_ASSETS_BUCKET = os.getenv("TEACHING_ASSETS_BUCKET", "teaching_assets").strip()
 SIGNED_URL_EXPIRES_SECONDS = int(os.getenv("SIGNED_URL_EXPIRES_SECONDS", "3600"))
-
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -36,10 +34,10 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 # =========================================================
-# FASTAPI
+# APP
 # =========================================================
 
-app = FastAPI(title="GurukulAI Backend", version="3.0.0")
+app = FastAPI(title="GurukulAI Backend", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,14 +59,14 @@ SESSION_STORE: Dict[str, Dict[str, Any]] = {}
 # HELPERS
 # =========================================================
 
+def now_ts() -> int:
+    return int(time.time())
+
+
 def safe_str(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
-
-
-def now_ts() -> int:
-    return int(time.time())
 
 
 def slugify(value: str) -> str:
@@ -102,16 +100,6 @@ def choose_non_repetitive(options: List[str], used: List[str], fallback: str) ->
     return picked
 
 
-def parse_class_level(value: Any) -> int:
-    if value is None:
-        return 0
-    if isinstance(value, int):
-        return value
-    txt = safe_str(value).lower()
-    match = re.search(r"(\d+)", txt)
-    return int(match.group(1)) if match else 0
-
-
 def build_storage_prefix(
     board: str,
     class_level: int,
@@ -133,7 +121,7 @@ def build_storage_prefix(
 
 
 # =========================================================
-# AGE / CLASS ADAPTIVE BRAIN
+# AGE / CLASS ADAPTIVE PROFILE
 # =========================================================
 
 def get_age_band(class_level: int) -> str:
@@ -152,39 +140,43 @@ def get_brain_profile(class_level: int) -> Dict[str, Any]:
     if band == "tiny":
         return {
             "band": band,
-            "tone": "playful_warm",
-            "sentence_style": "very_short",
-            "max_chunk_sentences": 2,
-            "question_style": "single_simple",
+            "intro_bank": [
+                "Hello! We will learn in a fun and easy way.",
+                "Hi! We will learn little by little.",
+                "Hello! Let us make this very easy."
+            ],
+            "transition_bank": [
+                "Now let us see the next small idea.",
+                "Good. Let us go one step at a time.",
+                "Come, let us learn one more thing."
+            ],
             "praise_bank": [
                 "Very good!",
                 "Nice job!",
                 "Super!",
-                "You are doing well!",
+                "Well done!",
                 "That was smart!"
             ],
-            "transition_bank": [
-                "Now let us see the next little idea.",
-                "Good. Let us go step by step.",
-                "Now we learn one more thing.",
-                "Come, let us see the next part."
+            "question_bank": [
+                "Can you tell me one small answer?",
+                "Can you say one easy point?",
+                "Can you try one little answer?"
             ],
-            "intro_bank": [
-                "Hello! We will learn in a fun and easy way.",
-                "Hello! Let us learn slowly and happily.",
-                "Hi! We will make this very easy."
-            ],
-            "example_style": "toy_home_school",
-            "exam_mode": False,
         }
 
     if band == "young":
         return {
             "band": band,
-            "tone": "friendly_simple",
-            "sentence_style": "short",
-            "max_chunk_sentences": 3,
-            "question_style": "simple_guided",
+            "intro_bank": [
+                "Hello! We will understand this in a simple way.",
+                "Hi! Let us make this chapter easy.",
+                "Hello! We will learn clearly together."
+            ],
+            "transition_bank": [
+                "Now let us move to the next point.",
+                "Good. Let us build the next idea.",
+                "Now we continue step by step."
+            ],
             "praise_bank": [
                 "Good job.",
                 "Well done.",
@@ -192,28 +184,26 @@ def get_brain_profile(class_level: int) -> Dict[str, Any]:
                 "Correct.",
                 "You are following well."
             ],
-            "transition_bank": [
-                "Now let us move to the next point.",
-                "Good. Let us build the next idea.",
-                "Now we connect this with the next part.",
-                "Let us continue step by step."
+            "question_bank": [
+                "Can you answer this simply?",
+                "Can you explain this in easy words?",
+                "Can you tell me the main idea?"
             ],
-            "intro_bank": [
-                "Hello! We will understand this in a simple way.",
-                "Hello! Let us make this chapter easy.",
-                "Hi! We will learn this clearly together."
-            ],
-            "example_style": "school_daily_life",
-            "exam_mode": False,
         }
 
     if band == "middle":
         return {
             "band": band,
-            "tone": "curious_clear",
-            "sentence_style": "balanced",
-            "max_chunk_sentences": 4,
-            "question_style": "concept_check",
+            "intro_bank": [
+                "Hello! We will understand this concept clearly and practically.",
+                "Hi! Let us break this chapter into easy connected ideas.",
+                "Hello! We will learn this with logic and examples."
+            ],
+            "transition_bank": [
+                "Now let us connect this to the next concept.",
+                "Good. We can go one step deeper now.",
+                "Let us continue with the important idea here."
+            ],
             "praise_bank": [
                 "Good thinking.",
                 "Nice observation.",
@@ -221,27 +211,25 @@ def get_brain_profile(class_level: int) -> Dict[str, Any]:
                 "That is a smart answer.",
                 "You are understanding the concept well."
             ],
-            "transition_bank": [
-                "Now let us connect this to the next concept.",
-                "Good. We can go one step deeper now.",
-                "Let us continue with the important idea here.",
-                "Now we move from the basic idea to the clearer concept."
+            "question_bank": [
+                "Can you explain the main idea here?",
+                "What do you think this means?",
+                "Can you connect this to the chapter idea?"
             ],
-            "intro_bank": [
-                "Hello! We will understand this concept clearly and practically.",
-                "Hello! Let us break this chapter into easy connected ideas.",
-                "Hi! We will learn this with logic and simple examples."
-            ],
-            "example_style": "real_life_conceptual",
-            "exam_mode": True,
         }
 
     return {
         "band": band,
-        "tone": "mature_exam",
-        "sentence_style": "mature",
-        "max_chunk_sentences": 5,
-        "question_style": "reasoning_exam",
+        "intro_bank": [
+            "Hello. We will approach this in a clear and structured way.",
+            "Hi. Let us understand this chapter properly with concept and exam relevance.",
+            "Hello. We will keep this simple, but at the right academic level."
+        ],
+        "transition_bank": [
+            "Now let us move to the next important point.",
+            "Good. Let us go slightly deeper into the concept.",
+            "Now we connect this with the bigger idea."
+        ],
         "praise_bank": [
             "Good point.",
             "That is a valid observation.",
@@ -249,80 +237,33 @@ def get_brain_profile(class_level: int) -> Dict[str, Any]:
             "You are thinking in the right direction.",
             "That shows good understanding."
         ],
-        "transition_bank": [
-            "Now let us move to the next important point.",
-            "Good. Let us go slightly deeper into the concept.",
-            "Now we connect this with the bigger idea.",
-            "Let us continue with the exam-relevant part."
+        "question_bank": [
+            "Can you explain this briefly with the correct concept?",
+            "How would you express this in an exam-friendly way?",
+            "What is the core idea here?"
         ],
-        "intro_bank": [
-            "Hello. We will approach this in a clear and structured way.",
-            "Hello. Let us understand this chapter properly, with concept and exam relevance.",
-            "Hi. We will keep this simple, but at the right academic level."
-        ],
-        "example_style": "mature_real_exam",
-        "exam_mode": True,
     }
 
 
 def rewrite_for_class_level(raw_text: str, class_level: int, chapter_title: str = "") -> str:
-    """
-    Turns generic DB chunk text into age-appropriate delivery style.
-    """
-    profile = get_brain_profile(class_level)
-    band = profile["band"]
     raw_text = safe_str(raw_text)
-
     if not raw_text:
         return ""
 
-    if band == "tiny":
-        return (
-            f"{raw_text} "
-            f"Think of it like something you see at home or in school. "
-            f"We will learn only one small idea at a time."
-        )
-
-    if band == "young":
-        return (
-            f"{raw_text} "
-            f"Let us understand it with a simple example from daily life."
-        )
-
-    if band == "middle":
-        suffix = " Also notice how this idea connects to the chapter meaning."
-        if chapter_title:
-            suffix = f" Also notice how this idea connects to {chapter_title}."
-        return raw_text + suffix
-
-    suffix = " Keep this in mind from both concept and answer-writing perspective."
-    if chapter_title:
-        suffix = f" Keep this connected to the larger understanding of {chapter_title}, especially for conceptual and exam use."
-    return raw_text + suffix
-
-
-def get_question_prompt_for_class_level(class_level: int) -> str:
     band = get_age_band(class_level)
+
     if band == "tiny":
-        return "Can you tell me one small answer?"
+        return f"{raw_text} Think of it like something small you can imagine at home or in school."
     if band == "young":
-        return "Can you answer this in a simple way?"
+        return f"{raw_text} Let us connect it with a simple daily-life example."
     if band == "middle":
-        return "Can you explain the main idea here?"
-    return "Can you explain this briefly with the correct concept?"
+        return f"{raw_text} Also notice how this connects to the main meaning of the chapter."
+    return f"{raw_text} Keep this connected to the larger concept and answer-writing perspective."
 
 
 # =========================================================
-# RANDOMIZED BANKS
+# RANDOMIZATION BANKS
 # =========================================================
-
-QUESTION_OPTIONS = [
-    "Would you like the easy explanation first or the deeper explanation first?",
-    "Should I explain this with an example?",
-    "Do you want a short revision version or full understanding?",
-    "Shall I connect this with a real-life situation?",
-    "Would you like me to continue part by part?"
-]
 
 EXAMPLE_PREFIXES = [
     "Let me make this easy to picture.",
@@ -362,7 +303,6 @@ def ensure_session(session_id: Optional[str]) -> Tuple[str, Dict[str, Any]]:
             "used_example_prefixes": [],
             "used_summary_prefixes": [],
             "history": [],
-            "current_part_index": 0,
             "current_chunk_index": 0,
         }
     return sid, SESSION_STORE[sid]
@@ -412,16 +352,15 @@ def fetch_book(board: str, class_level: int, subject: str, book: str) -> Optiona
     if rows:
         return rows[0]
 
-    # soft match fallback
-    all_rows = fetch_rows("books", filters={"board": board, "class_level": class_level, "subject": subject})
-    for row in all_rows:
+    rows = fetch_rows("books", filters={"board": board, "class_level": class_level, "subject": subject})
+    for row in rows:
         if safe_str(row.get("title")).lower() == safe_str(book).lower():
             return row
     return None
 
 
 def fetch_book_chapter(book_id: str, chapter_title: str) -> Optional[Dict[str, Any]]:
-    rows = fetch_rows("book_chapters", filters={"book_id": book_id})
+    rows = fetch_rows("book_chapters", filters={"book_id": book_id}, order_by="chapter_order")
     for row in rows:
         if safe_str(row.get("chapter_title")).lower() == safe_str(chapter_title).lower():
             return row
@@ -429,7 +368,7 @@ def fetch_book_chapter(book_id: str, chapter_title: str) -> Optional[Dict[str, A
 
 
 def fetch_chapter(book_id: str, chapter_title: str) -> Optional[Dict[str, Any]]:
-    rows = fetch_rows("chapters", filters={"book_id": book_id})
+    rows = fetch_rows("chapters", filters={"book_id": book_id}, order_by="chapter_order")
     for row in rows:
         if safe_str(row.get("title")).lower() == safe_str(chapter_title).lower():
             return row
@@ -451,7 +390,7 @@ def fetch_chunks(book_id: str, book_chapter_id: str) -> List[Dict[str, Any]]:
 
 
 # =========================================================
-# STORAGE HELPERS
+# STORAGE
 # =========================================================
 
 def list_assets_under_prefix(prefix: str) -> List[str]:
@@ -551,8 +490,7 @@ def build_teaching_payload(
     )
 
     part_prefixes = [f"{chapter_prefix}/part-{p.get('part_no')}" for p in parts if p.get("part_no") is not None]
-    asset_prefixes = [chapter_prefix] + part_prefixes
-    assets = build_signed_assets(asset_prefixes)
+    assets = build_signed_assets([chapter_prefix] + part_prefixes)
 
     return {
         "book": {
@@ -623,15 +561,16 @@ def wants_assets(text: str) -> bool:
 def build_intro_text(session: Dict[str, Any]) -> str:
     profile = get_brain_profile(session["class_level"])
     intro = choose_non_repetitive(profile["intro_bank"], session["used_greetings"], profile["intro_bank"][0])
-    q = choose_non_repetitive(QUESTION_OPTIONS, session["used_questions"], QUESTION_OPTIONS[0])
+    question = choose_non_repetitive(profile["question_bank"], session["used_questions"], profile["question_bank"][0])
 
-    if profile["band"] == "tiny":
-        return f"{intro} We will learn little by little. {q}"
-    if profile["band"] == "young":
-        return f"{intro} We will go step by step. {q}"
-    if profile["band"] == "middle":
-        return f"{intro} We will connect ideas clearly. {q}"
-    return f"{intro} We will keep it clear, structured, and age-appropriate. {q}"
+    band = profile["band"]
+    if band == "tiny":
+        return f"{intro} We will learn little by little. {question}"
+    if band == "young":
+        return f"{intro} We will go step by step. {question}"
+    if band == "middle":
+        return f"{intro} We will connect ideas clearly. {question}"
+    return f"{intro} We will keep it clear, structured, and age-appropriate. {question}"
 
 
 def build_praise(session: Dict[str, Any]) -> str:
@@ -642,10 +581,6 @@ def build_praise(session: Dict[str, Any]) -> str:
 def build_transition(session: Dict[str, Any]) -> str:
     profile = get_brain_profile(session["class_level"])
     return choose_non_repetitive(profile["transition_bank"], session["used_transitions"], profile["transition_bank"][0])
-
-
-def group_chunks_by_order(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return sorted(chunks, key=lambda x: (x.get("chunk_order") or 999999, x.get("id") or ""))
 
 
 def get_current_chunk(chunks: List[Dict[str, Any]], session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -678,44 +613,38 @@ def move_previous_chunk(chunks: List[Dict[str, Any]], session: Dict[str, Any]) -
 
 
 def build_chunk_explanation(session: Dict[str, Any], bundle: Dict[str, Any], chunk: Optional[Dict[str, Any]]) -> str:
+    transition = build_transition(session)
     class_level = session["class_level"]
     chapter_title = bundle["chapter"]["title"]
-    transition = build_transition(session)
 
     if not chunk:
         if class_level <= 2:
-            return f"{transition} I do not see the teaching text here yet, but I am ready to teach this chapter in a simple way."
+            return f"{transition} I do not see the teaching text here yet, but I am ready to teach this in a simple way."
         if class_level <= 5:
             return f"{transition} I do not see the teaching text here yet, but the chapter structure is ready."
-        return f"{transition} I do not see chapter text for this section yet, but the structure is ready for teaching."
+        return f"{transition} I do not see the text here yet, but the chapter structure is ready for teaching."
 
     raw = safe_str(chunk.get("content"))
     if not raw:
         return f"{transition} This section is present, but its teaching text is empty right now."
 
     text = rewrite_for_class_level(raw, class_level, chapter_title)
-
-    if class_level <= 2:
-        return f"{transition} {text}"
-    if class_level <= 5:
-        return f"{transition} {text}"
-    if class_level <= 8:
-        return f"{transition} {text}"
     return f"{transition} {text}"
 
 
-def build_example_response(session: Dict[str, Any], bundle: Dict[str, Any], chunk: Optional[Dict[str, Any]]) -> str:
+def build_example_response(session: Dict[str, Any], bundle: Dict[str, Any]) -> str:
     prefix = choose_non_repetitive(EXAMPLE_PREFIXES, session["used_example_prefixes"], EXAMPLE_PREFIXES[0])
     class_level = session["class_level"]
     title = bundle["chapter"]["title"]
 
     if class_level <= 2:
-        return f"{prefix} Think of {title} like a little picture or situation you can imagine easily."
+        return f"{prefix} Think of {title} like a small picture or situation you can imagine easily."
     if class_level <= 5:
         return f"{prefix} Let us relate {title} to a simple school or daily-life situation."
     if class_level <= 8:
-        return f"{prefix} Let us connect {title} with a practical real-life example so the concept feels natural."
+        return f"{prefix} Let us connect {title} with a practical real-life example so the idea feels natural."
     return f"{prefix} Let us connect {title} to a realistic situation and understand why the idea matters."
+
 
 def build_summary_response(session: Dict[str, Any], bundle: Dict[str, Any], chunks: List[Dict[str, Any]]) -> str:
     prefix = choose_non_repetitive(SUMMARY_PREFIXES, session["used_summary_prefixes"], SUMMARY_PREFIXES[0])
@@ -754,7 +683,7 @@ def build_asset_response(session: Dict[str, Any], bundle: Dict[str, Any]) -> str
 
 
 # =========================================================
-# REQUEST / RESPONSE MODELS
+# MODELS
 # =========================================================
 
 class StartSessionRequest(BaseModel):
@@ -839,9 +768,8 @@ def start_session(req: StartSessionRequest):
         chapter=req.chapter,
     )
 
-    chunks = group_chunks_by_order(bundle.get("chunks", []))
+    chunks = bundle.get("chunks", [])
     current_chunk = get_current_chunk(chunks, session)
-
     intro = build_intro_text(session)
     teaching = build_chunk_explanation(session, bundle, current_chunk)
 
@@ -849,8 +777,6 @@ def start_session(req: StartSessionRequest):
         teacher_text = f"{intro} Today we will learn {req.chapter}. {teaching}"
     elif req.class_level <= 5:
         teacher_text = f"{intro} Today we are learning {req.chapter}. {teaching}"
-    elif req.class_level <= 8:
-        teacher_text = f"{intro} Today we are studying {req.book} - {req.chapter}. {teaching}"
     else:
         teacher_text = f"{intro} Today we are studying {req.book} - {req.chapter}. {teaching}"
 
@@ -906,7 +832,7 @@ def respond(req: StudentTurnRequest):
         chapter=session["chapter"],
     )
 
-    chunks = group_chunks_by_order(bundle.get("chunks", []))
+    chunks = bundle.get("chunks", [])
     current_chunk = get_current_chunk(chunks, session)
     praise = build_praise(session)
 
@@ -919,9 +845,9 @@ def respond(req: StudentTurnRequest):
             if session["class_level"] <= 2:
                 teacher_text = f"{praise} We finished this part. Shall I revise it now?"
             elif session["class_level"] <= 5:
-                teacher_text = f"{praise} We have reached the end of the loaded chapter flow. Would you like a recap?"
+                teacher_text = f"{praise} We reached the end of the loaded chapter flow. Would you like a recap?"
             else:
-                teacher_text = f"{praise} We have reached the end of the loaded chapter flow. You can ask for revision, examples, or assets."
+                teacher_text = f"{praise} We reached the end of the loaded chapter flow. You can ask for revision, examples, or assets."
         else:
             teacher_text = build_chunk_explanation(session, bundle, next_chunk)
 
@@ -933,21 +859,18 @@ def respond(req: StudentTurnRequest):
             teacher_text = build_chunk_explanation(session, bundle, prev_chunk)
 
     elif wants_example(student_message):
-        teacher_text = build_example_response(session, bundle, current_chunk)
+        teacher_text = build_example_response(session, bundle)
 
     elif wants_summary(student_message):
-        teacher_text = build_summary_response(session, bundle, chunks)
+        teacher_text = buildSummary = build_summary_response(session, bundle, chunks)
 
     elif wants_assets(student_message):
         teacher_text = build_asset_response(session, bundle)
 
     else:
-        question_prompt = get_question_prompt_for_class_level(session["class_level"])
-        teacher_text = (
-            f"{praise} "
-            f"{build_chunk_explanation(session, bundle, current_chunk)} "
-            f"{question_prompt}"
-        )
+        profile = get_brain_profile(session["class_level"])
+        followup = choose_non_repetitive(profile["question_bank"], session["used_questions"], profile["question_bank"][0])
+        teacher_text = f"{praise} {build_chunk_explanation(session, bundle, current_chunk)} {followup}"
 
     current_chunk_after = get_current_chunk(chunks, session)
     session["history"].append({"role": "teacher", "text": teacher_text, "ts": now_ts()})
