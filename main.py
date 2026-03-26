@@ -538,42 +538,20 @@ def fetch_rows(table: str, filters: Optional[Dict[str, Any]] = None, order_by: O
         return []
 
 
-def fetch_teacher_mapping(board: str, class_level: int, subject: str) -> Optional[Dict[str, Any]]:
+def fetch_teacher_avatar(teacher_name: str) -> Optional[Dict[str, Any]]:
     try:
         result = (
-            supabase.table("teacher_subject_map")
-            .select("*, teacher_profiles(*)")
-            .eq("board", board)
-            .eq("subject", subject)
+            supabase.table("teacher_avatars")
+            .select("*")
+            .eq("teacher_name", teacher_name)
             .eq("active", True)
-            .order("priority")
+            .limit(1)
             .execute()
         )
         rows = result.data or []
-
-        valid_class_values = {
-            str(class_level).lower(),
-            f"class {class_level}".lower(),
-            f"class-{class_level}".lower(),
-        }
-
-        for row in rows:
-            row_class = safe_str(row.get("class_level")).lower()
-            if row_class not in valid_class_values:
-                continue
-
-            teacher = row.get("teacher_profiles")
-            if teacher and teacher.get("active") is True:
-                return {
-                    "mapping": row,
-                    "profile": teacher,
-                }
-        return None
+        return rows[0] if rows else None
     except Exception as e:
-        logger.warning(
-            "fetch_teacher_mapping failed board=%s class=%s subject=%s error=%s",
-            board, class_level, subject, e
-        )
+        logger.warning("fetch_teacher_avatar failed teacher_name=%s error=%s", teacher_name, e)
         return None
 
 
@@ -630,11 +608,12 @@ def build_teacher_bundle(board: str, class_level: int, subject: str) -> Dict[str
             "mapping": None,
         }
 
-    profile = teacher_map["profile"]
-    teacher_id = profile.get("id")
+ profile = teacher_map["profile"]
+teacher_id = profile.get("id")
+teacher_name = safe_str(profile.get("teacher_name"))
 
-    persona = fetch_teacher_persona(teacher_id) if teacher_id else None
-    avatar = fetch_teacher_avatar(teacher_id) if teacher_id else None
+persona = fetch_teacher_persona(teacher_id) if teacher_id else None
+avatar = fetch_teacher_avatar(teacher_name) if teacher_name else None
 
     return {
         "profile": profile,
