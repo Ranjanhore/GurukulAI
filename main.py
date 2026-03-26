@@ -37,7 +37,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # APP
 # =========================================================
 
-app = FastAPI(title="GurukulAI Backend", version="4.1.0")
+app = FastAPI(title="GurukulAI Backend", version="4.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -232,13 +232,10 @@ def get_part_interaction_data(part_row: Optional[Dict[str, Any]]) -> Dict[str, A
 
             if item_type == "oral_question_bank" and isinstance(items, list):
                 oral_question_bank = [safe_str(x) for x in items if safe_str(x)]
-
             elif item_type == "written_practice_bank" and isinstance(items, list):
                 written_practice_bank = [safe_str(x) for x in items if safe_str(x)]
-
             elif item_type == "answer_key" and isinstance(items, list):
                 answer_key = items
-
             elif item_type == "teacher_feedback_bank" and isinstance(items, dict):
                 teacher_feedback_bank = {
                     "correct": [safe_str(x) for x in items.get("correct", []) if safe_str(x)],
@@ -491,6 +488,12 @@ def ensure_session(session_id: Optional[str]) -> Tuple[str, Dict[str, Any]]:
             "book": "",
             "chapter": "",
             "teaching_style": "",
+            "teacher_name": "",
+            "teacher_code": "",
+            "teacher_voice_provider": "",
+            "teacher_voice_id": "",
+            "teacher_base_language": "",
+            "teacher_accent_style": "",
             "used_greetings": [],
             "used_transitions": [],
             "used_praises": [],
@@ -533,6 +536,112 @@ def fetch_rows(table: str, filters: Optional[Dict[str, Any]] = None, order_by: O
     except Exception as e:
         logger.warning("fetch_rows failed table=%s filters=%s error=%s", table, filters, e)
         return []
+
+
+def fetch_teacher_mapping(board: str, class_level: int, subject: str) -> Optional[Dict[str, Any]]:
+    try:
+        result = (
+            supabase.table("teacher_subject_map")
+            .select("*, teacher_profiles(*)")
+            .eq("board", board)
+            .eq("subject", subject)
+            .eq("active", True)
+            .order("priority")
+            .execute()
+        )
+        rows = result.data or []
+
+        valid_class_values = {
+            str(class_level).lower(),
+            f"class {class_level}".lower(),
+            f"class-{class_level}".lower(),
+        }
+
+        for row in rows:
+            row_class = safe_str(row.get("class_level")).lower()
+            if row_class not in valid_class_values:
+                continue
+
+            teacher = row.get("teacher_profiles")
+            if teacher and teacher.get("active") is True:
+                return {
+                    "mapping": row,
+                    "profile": teacher,
+                }
+        return None
+    except Exception as e:
+        logger.warning(
+            "fetch_teacher_mapping failed board=%s class=%s subject=%s error=%s",
+            board, class_level, subject, e
+        )
+        return None
+
+
+def fetch_teacher_persona(teacher_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        result = (
+            supabase.table("teacher_personas")
+            .select("*")
+            .eq("teacher_id", teacher_id)
+            .eq("active", True)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.warning("fetch_teacher_persona failed teacher_id=%s error=%s", teacher_id, e)
+        return None
+
+
+def fetch_teacher_avatar(teacher_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        result = (
+            supabase.table("teacher_avatars")
+            .select("*")
+            .eq("teacher_id", teacher_id)
+            .eq("active", True)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        return rows[0] if rows else None
+    except Exception as e:
+        logger.warning("fetch_teacher_avatar failed teacher_id=%s error=%s", teacher_id, e)
+        return None
+
+
+def build_teacher_bundle(board: str, class_level: int, subject: str) -> Dict[str, Any]:
+    teacher_map = fetch_teacher_mapping(board, class_level, subject)
+
+    if not teacher_map:
+        return {
+            "profile": {
+                "teacher_name": "Teacher Asha",
+                "teacher_code": "default_teacher",
+                "role_label": "AI Teacher",
+                "base_language": "English",
+                "accent_style": "Indian",
+                "voice_provider": "",
+                "voice_id": "",
+            },
+            "persona": None,
+            "avatar": None,
+            "mapping": None,
+        }
+
+    profile = teacher_map["profile"]
+    teacher_id = profile.get("id")
+
+    persona = fetch_teacher_persona(teacher_id) if teacher_id else None
+    avatar = fetch_teacher_avatar(teacher_id) if teacher_id else None
+
+    return {
+        "profile": profile,
+        "persona": persona,
+        "avatar": avatar,
+        "mapping": teacher_map.get("mapping"),
+    }
 
 
 def fetch_book(board: str, class_level: int, subject: str, book: str) -> Optional[Dict[str, Any]]:
@@ -676,6 +785,7 @@ def build_teaching_payload(
 
     parts = fetch_parts(chapter_row["id"])
     chunks = fetch_chunks(book_id, book_chapter["id"])
+    teacher_bundle = build_teacher_bundle(board, class_level, subject)
 
     chapter_prefix = safe_str(chapter_row.get("storage_prefix")) or build_storage_prefix(
         board=board,
@@ -710,6 +820,7 @@ def build_teaching_payload(
             "storage_prefix": chapter_prefix,
             "publisher": chapter_row.get("publisher"),
         },
+        "teacher": teacher_bundle,
         "chapter_parts": parts,
         "chunks": chunks,
         "assets": assets,
@@ -757,15 +868,16 @@ def build_intro_text(session: Dict[str, Any]) -> str:
     profile = get_brain_profile(session["class_level"])
     intro = choose_non_repetitive(profile["intro_bank"], session["used_greetings"], profile["intro_bank"][0])
     question = choose_non_repetitive(profile["question_bank"], session["used_questions"], profile["question_bank"][0])
+    teacher_name = safe_str(session.get("teacher_name")) or "Teacher"
 
     band = profile["band"]
     if band == "tiny":
-        return f"{intro} We will learn little by little. {question}"
+        return f"{intro} I am {teacher_name}. We will learn little by little. {question}"
     if band == "young":
-        return f"{intro} We will go step by step. {question}"
+        return f"{intro} I am {teacher_name}. We will go step by step. {question}"
     if band == "middle":
-        return f"{intro} We will connect ideas clearly. {question}"
-    return f"{intro} We will keep it clear, structured, and age-appropriate. {question}"
+        return f"{intro} I am {teacher_name}. We will connect ideas clearly. {question}"
+    return f"{intro} I am {teacher_name}. We will keep it clear, structured, and age-appropriate. {question}"
 
 
 def build_praise(session: Dict[str, Any]) -> str:
@@ -1004,6 +1116,16 @@ def start_session(req: StartSessionRequest):
         chapter=req.chapter,
     )
 
+    teacher_info = bundle.get("teacher", {}) or {}
+    teacher_profile = teacher_info.get("profile", {}) or {}
+
+    session["teacher_name"] = safe_str(teacher_profile.get("teacher_name"))
+    session["teacher_code"] = safe_str(teacher_profile.get("teacher_code"))
+    session["teacher_voice_provider"] = safe_str(teacher_profile.get("voice_provider"))
+    session["teacher_voice_id"] = safe_str(teacher_profile.get("voice_id"))
+    session["teacher_base_language"] = safe_str(teacher_profile.get("base_language"))
+    session["teacher_accent_style"] = safe_str(teacher_profile.get("accent_style"))
+
     chunks = bundle.get("chunks", [])
     current_chunk = get_current_chunk(chunks, session)
     intro = build_intro_text(session)
@@ -1030,6 +1152,14 @@ def start_session(req: StartSessionRequest):
             "chapter": session["chapter"],
             "teaching_style": session["teaching_style"],
             "age_band": get_age_band(session["class_level"]),
+        },
+        "teacher_profile": {
+            "teacher_name": session.get("teacher_name"),
+            "teacher_code": session.get("teacher_code"),
+            "voice_provider": session.get("teacher_voice_provider"),
+            "voice_id": session.get("teacher_voice_id"),
+            "base_language": session.get("teacher_base_language"),
+            "accent_style": session.get("teacher_accent_style"),
         },
         "progress": {
             "current_chunk_index": session["current_chunk_index"],
@@ -1114,6 +1244,14 @@ def respond(req: StudentTurnRequest):
     return {
         "session_id": session_id,
         "teacher_text": teacher_text,
+        "teacher_profile": {
+            "teacher_name": session.get("teacher_name"),
+            "teacher_code": session.get("teacher_code"),
+            "voice_provider": session.get("teacher_voice_provider"),
+            "voice_id": session.get("teacher_voice_id"),
+            "base_language": session.get("teacher_base_language"),
+            "accent_style": session.get("teacher_accent_style"),
+        },
         "progress": {
             "current_chunk_index": session["current_chunk_index"],
             "current_chunk_id": current_chunk_after.get("id") if current_chunk_after else None,
