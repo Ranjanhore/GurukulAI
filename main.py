@@ -215,24 +215,43 @@ def choose_non_repetitive(options: List[str], used: List[str], fallback: str) ->
     return picked
 
 
-def build_storage_prefix(
-    board: str,
-    class_level: int,
-    subject: str,
-    book: str,
-    chapter: str,
-    part: Optional[str] = None,
-) -> str:
-    parts = [
-        slugify(board),
-        f"class-{class_level}",
-        slugify(subject),
-        slugify(book),
-        slugify(chapter),
+def guess_chapter_home_asset(assets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    preferred = [
+        "chapter-home.png",
+        "chapter-home.jpg",
+        "chapter-home.jpeg",
+        "chapter-home.webp",
+        "00.png",
+        "00.jpg",
+        "00.jpeg",
+        "00.webp",
     ]
-    if part:
-        parts.append(slugify(part))
-    return "/".join([p for p in parts if p])
+
+    by_name = {}
+    for asset in assets:
+        path = safe_str(asset.get("path"))
+        name = path.split("/")[-1].lower() if path else ""
+        if name:
+            by_name[name] = asset
+
+    for name in preferred:
+        if name in by_name:
+            return by_name[name]
+
+    image_assets = [a for a in assets if safe_str(a.get("type")) == "image"]
+    return image_assets[0] if image_assets else None
+
+
+def split_assets(assets: List[Dict[str, Any]]) -> Dict[str, Any]:
+    chapter_home = guess_chapter_home_asset(assets)
+    videos = [a for a in assets if safe_str(a.get("type")) == "video"]
+    images = [a for a in assets if safe_str(a.get("type")) == "image"]
+
+    return {
+        "chapter_home_asset": chapter_home,
+        "video_assets": videos,
+        "image_assets": images,
+    }
 
 
 def get_time_greeting() -> str:
@@ -835,23 +854,14 @@ def get_teacher_bundle(board: str, class_level: int, subject: str) -> Dict[str, 
         "mapping": teacher_map.get("mapping"),
     }
 
-
 def fetch_book(board: str, class_level: int, subject: str, book: str) -> Optional[Dict[str, Any]]:
-    rows = fetch_rows(
-        "books",
-        filters={
-            "board": board,
-            "class_level": class_level,
-            "subject": subject,
-            "title": book,
-        },
-    )
-    if rows:
-        return rows[0]
+    resolved = resolve_book(board, str(class_level), subject, book)
+    if resolved:
+        return resolved
 
     rows = fetch_rows("books", filters={"board": board, "class_level": class_level, "subject": subject})
     for row in rows:
-        if safe_str(row.get("title")).lower() == safe_str(book).lower():
+        if normalize_book_label(row.get("title")) == normalize_book_label(book):
             return row
     return None
 
@@ -988,35 +998,38 @@ def build_teaching_payload(
     )
 
     part_prefixes = [f"{chapter_prefix}/part-{p.get('part_no')}" for p in parts if p.get("part_no") is not None]
-    assets = build_signed_assets([chapter_prefix] + part_prefixes)
+    asset_groups = split_assets(assets)
 
-    return {
-        "book": {
-            "id": book_row.get("id"),
-            "board": book_row.get("board"),
-            "class_level": book_row.get("class_level"),
-            "subject": book_row.get("subject"),
-            "title": book_row.get("title"),
-            "publisher": book_row.get("publisher"),
-        },
-        "book_chapter": {
-            "id": book_chapter.get("id"),
-            "chapter_order": book_chapter.get("chapter_order"),
-            "chapter_title": book_chapter.get("chapter_title"),
-        },
-        "chapter": {
-            "id": chapter_row.get("id"),
-            "title": chapter_row.get("title"),
-            "chapter_order": chapter_row.get("chapter_order"),
-            "storage_bucket": chapter_row.get("storage_bucket"),
-            "storage_prefix": chapter_prefix,
-            "publisher": chapter_row.get("publisher"),
-        },
-        "teacher": teacher_bundle,
-        "chapter_parts": parts,
-        "chunks": chunks,
-        "assets": assets,
-    }
+   return {
+    "book": {
+        "id": book_row.get("id"),
+        "board": book_row.get("board"),
+        "class_level": book_row.get("class_level"),
+        "subject": book_row.get("subject"),
+        "title": book_row.get("title"),
+        "publisher": book_row.get("publisher"),
+    },
+    "book_chapter": {
+        "id": book_chapter.get("id"),
+        "chapter_order": book_chapter.get("chapter_order"),
+        "chapter_title": book_chapter.get("chapter_title"),
+    },
+    "chapter": {
+        "id": chapter_row.get("id"),
+        "title": chapter_row.get("title"),
+        "chapter_order": chapter_row.get("chapter_order"),
+        "storage_bucket": chapter_row.get("storage_bucket"),
+        "storage_prefix": chapter_prefix,
+        "publisher": chapter_row.get("publisher"),
+    },
+    "teacher": teacher_bundle,
+    "chapter_parts": parts,
+    "chunks": chunks,
+    "assets": assets,
+    "chapter_home_asset": asset_groups["chapter_home_asset"],
+    "video_assets": asset_groups["video_assets"],
+    "image_assets": asset_groups["image_assets"],
+}
 
 
 # =========================================================
