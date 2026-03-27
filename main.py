@@ -996,40 +996,45 @@ def build_teaching_payload(
         book=book,
         chapter=chapter,
     )
+    part_prefixes = [
+        f"{chapter_prefix}/part-{p.get('part_no')}"
+        for p in parts
+        if p.get("part_no") is not None
+    ]
 
-    part_prefixes = [f"{chapter_prefix}/part-{p.get('part_no')}" for p in parts if p.get("part_no") is not None]
+    assets = build_signed_assets([chapter_prefix] + part_prefixes)
     asset_groups = split_assets(assets)
 
-   return {
-    "book": {
-        "id": book_row.get("id"),
-        "board": book_row.get("board"),
-        "class_level": book_row.get("class_level"),
-        "subject": book_row.get("subject"),
-        "title": book_row.get("title"),
-        "publisher": book_row.get("publisher"),
-    },
-    "book_chapter": {
-        "id": book_chapter.get("id"),
-        "chapter_order": book_chapter.get("chapter_order"),
-        "chapter_title": book_chapter.get("chapter_title"),
-    },
-    "chapter": {
-        "id": chapter_row.get("id"),
-        "title": chapter_row.get("title"),
-        "chapter_order": chapter_row.get("chapter_order"),
-        "storage_bucket": chapter_row.get("storage_bucket"),
-        "storage_prefix": chapter_prefix,
-        "publisher": chapter_row.get("publisher"),
-    },
-    "teacher": teacher_bundle,
-    "chapter_parts": parts,
-    "chunks": chunks,
-    "assets": assets,
-    "chapter_home_asset": asset_groups["chapter_home_asset"],
-    "video_assets": asset_groups["video_assets"],
-    "image_assets": asset_groups["image_assets"],
-}
+    return {
+        "book": {
+            "id": book_row.get("id"),
+            "board": book_row.get("board"),
+            "class_level": book_row.get("class_level"),
+            "subject": book_row.get("subject"),
+            "title": book_row.get("title"),
+            "publisher": book_row.get("publisher"),
+        },
+        "book_chapter": {
+            "id": book_chapter.get("id"),
+            "chapter_order": book_chapter.get("chapter_order"),
+            "chapter_title": book_chapter.get("chapter_title"),
+        },
+        "chapter": {
+            "id": chapter_row.get("id"),
+            "title": chapter_row.get("title"),
+            "chapter_order": chapter_row.get("chapter_order"),
+            "storage_bucket": chapter_row.get("storage_bucket"),
+            "storage_prefix": chapter_prefix,
+            "publisher": chapter_row.get("publisher"),
+        },
+        "teacher": teacher_bundle,
+        "chapter_parts": parts,
+        "chunks": chunks,
+        "assets": assets,
+        "chapter_home_asset": asset_groups["chapter_home_asset"],
+        "video_assets": asset_groups["video_assets"],
+        "image_assets": asset_groups["image_assets"],
+    }
 
 
 # =========================================================
