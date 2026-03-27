@@ -122,6 +122,46 @@ SUMMARY_PREFIXES = [
 # =========================================================
 # GENERIC HELPERS
 # =========================================================
+def normalize_book_label(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+def resolve_book(board: str, class_level: str, subject: str, book_label: str):
+    norm = normalize_book_label(book_label)
+
+    # try books.title
+    rows = (
+        supabase.table("books")
+        .select("*")
+        .eq("board", board)
+        .eq("class_level", str(class_level))
+        .eq("subject", subject)
+        .execute()
+        .data
+        or []
+    )
+
+    for row in rows:
+        if normalize_book_label(row.get("title")) == norm:
+            return row
+
+    # try subject_chapters.book_name
+    rows2 = (
+        supabase.table("subject_chapters")
+        .select("*")
+        .eq("board", board)
+        .eq("class_level", str(class_level))
+        .eq("subject", subject)
+        .execute()
+        .data
+        or []
+    )
+
+    for row in rows2:
+        if normalize_book_label(row.get("book_name")) == norm:
+            return row
+
+    return None
+
 
 def now_ts() -> int:
     return int(time.time())
