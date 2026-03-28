@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -39,7 +38,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # APP
 # =========================================================
 
-app = FastAPI(title="GurukulAI Backend", version="4.3.0")
+app = FastAPI(title="GurukulAI Backend", version="4.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -122,13 +121,14 @@ SUMMARY_PREFIXES = [
 # =========================================================
 # GENERIC HELPERS
 # =========================================================
+
 def normalize_book_label(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().lower())
+
 
 def resolve_book(board: str, class_level: str, subject: str, book_label: str):
     norm = normalize_book_label(book_label)
 
-    # try books.title
     rows = (
         supabase.table("books")
         .select("*")
@@ -144,7 +144,6 @@ def resolve_book(board: str, class_level: str, subject: str, book_label: str):
         if normalize_book_label(row.get("title")) == norm:
             return row
 
-    # try subject_chapters.book_name
     rows2 = (
         supabase.table("subject_chapters")
         .select("*")
@@ -191,6 +190,14 @@ def slugify(value: str) -> str:
     return value
 
 
+def parse_class_level(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    text = safe_str(value)
+    match = re.search(r"\d+", text)
+    return int(match.group()) if match else 0
+
+
 def unique_keep_order(items: List[Any]) -> List[Any]:
     seen = set()
     out = []
@@ -215,45 +222,6 @@ def choose_non_repetitive(options: List[str], used: List[str], fallback: str) ->
     return picked
 
 
-def guess_chapter_home_asset(assets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    preferred = [
-        "chapter-home.png",
-        "chapter-home.jpg",
-        "chapter-home.jpeg",
-        "chapter-home.webp",
-        "00.png",
-        "00.jpg",
-        "00.jpeg",
-        "00.webp",
-    ]
-
-    by_name = {}
-    for asset in assets:
-        path = safe_str(asset.get("path"))
-        name = path.split("/")[-1].lower() if path else ""
-        if name:
-            by_name[name] = asset
-
-    for name in preferred:
-        if name in by_name:
-            return by_name[name]
-
-    image_assets = [a for a in assets if safe_str(a.get("type")) == "image"]
-    return image_assets[0] if image_assets else None
-
-
-def split_assets(assets: List[Dict[str, Any]]) -> Dict[str, Any]:
-    chapter_home = guess_chapter_home_asset(assets)
-    videos = [a for a in assets if safe_str(a.get("type")) == "video"]
-    images = [a for a in assets if safe_str(a.get("type")) == "image"]
-
-    return {
-        "chapter_home_asset": chapter_home,
-        "video_assets": videos,
-        "image_assets": images,
-    }
-
-
 def get_time_greeting() -> str:
     hour = datetime.now().hour
     if hour < 12:
@@ -261,6 +229,38 @@ def get_time_greeting() -> str:
     if hour < 17:
         return "Good afternoon!"
     return "Good evening!"
+
+
+def build_storage_prefix(
+    board: str,
+    class_level: int,
+    subject: str,
+    book: str,
+    chapter: str,
+    part: Optional[str] = None,
+) -> str:
+    pieces = [
+        slugify(board),
+        f"class-{parse_class_level(class_level)}",
+        slugify(subject),
+        slugify(book),
+        slugify(chapter),
+    ]
+    if part:
+        pieces.append(slugify(part))
+    return "/".join([p for p in pieces if p])
+
+
+def build_chapter_home_asset_path(
+    board: str,
+    class_level: int,
+    subject: str,
+    book: str,
+    chapter: str,
+) -> str:
+    chapter_slug = slugify(chapter)
+    prefix = build_storage_prefix(board, class_level, subject, book, chapter)
+    return f"{prefix}/{chapter_slug}-home.png"
 
 
 # =========================================================
@@ -611,7 +611,6 @@ def normalize_tts_text(text: str, base_language: str = "", accent_style: str = "
 
     mode = detect_language_mode(out, base_language)
 
-    # Keep technical words in English while making mixed-language text easier for TTS.
     if mode in {"regional_mixed", "hindi_script"}:
         out = out.replace(" / ", " or ")
         out = re.sub(r"\bplus\b", " plus ", out, flags=re.IGNORECASE)
@@ -619,7 +618,6 @@ def normalize_tts_text(text: str, base_language: str = "", accent_style: str = "
         out = re.sub(r"\btimes\b", " multiplied by ", out, flags=re.IGNORECASE)
         out = re.sub(r"\bdivided by\b", " divided by ", out, flags=re.IGNORECASE)
 
-    # Give ElevenLabs cleaner pauses.
     out = re.sub(r"\(", ", ", out)
     out = re.sub(r"\)", ", ", out)
     out = re.sub(r"\s+-\s+", ". ", out)
@@ -627,7 +625,6 @@ def normalize_tts_text(text: str, base_language: str = "", accent_style: str = "
     out = re.sub(r";", ". ", out)
     out = re.sub(r"\s+", " ", out).strip()
 
-    # Avoid long symbol-heavy speech.
     out = out.replace("%", " percent")
     out = out.replace("=", " equals ")
     out = out.replace("+", " plus ")
@@ -854,6 +851,7 @@ def get_teacher_bundle(board: str, class_level: int, subject: str) -> Dict[str, 
         "mapping": teacher_map.get("mapping"),
     }
 
+
 def fetch_book(board: str, class_level: int, subject: str, book: str) -> Optional[Dict[str, Any]]:
     resolved = resolve_book(board, str(class_level), subject, book)
     if resolved:
@@ -925,6 +923,63 @@ def sign_asset_path(path: str, expires_in: int = SIGNED_URL_EXPIRES_SECONDS) -> 
     except Exception as e:
         logger.warning("sign_asset_path failed path=%s error=%s", path, e)
         return None
+
+
+def guess_chapter_home_asset(assets: List[Dict[str, Any]], board: str, class_level: int, subject: str, book: str, chapter: str) -> Optional[Dict[str, Any]]:
+    dynamic_name = f"{slugify(chapter)}-home.png"
+    preferred = [
+        dynamic_name,
+        "chapter-home.png",
+        "chapter-home.jpg",
+        "chapter-home.jpeg",
+        "chapter-home.webp",
+        "00.png",
+        "00.jpg",
+        "00.jpeg",
+        "00.webp",
+    ]
+
+    by_name = {}
+    for asset in assets:
+        path = safe_str(asset.get("path"))
+        name = path.split("/")[-1].lower() if path else ""
+        if name:
+            by_name[name] = asset
+
+    for name in preferred:
+        if name in by_name:
+            return by_name[name]
+
+    dynamic_path = build_chapter_home_asset_path(board, class_level, subject, book, chapter)
+    signed_url = sign_asset_path(dynamic_path)
+    if signed_url:
+        return {
+            "path": dynamic_path,
+            "type": "image",
+            "signed_url": signed_url,
+        }
+
+    image_assets = [a for a in assets if safe_str(a.get("type")) == "image"]
+    return image_assets[0] if image_assets else None
+
+
+def split_assets(
+    assets: List[Dict[str, Any]],
+    board: str,
+    class_level: int,
+    subject: str,
+    book: str,
+    chapter: str,
+) -> Dict[str, Any]:
+    chapter_home = guess_chapter_home_asset(assets, board, class_level, subject, book, chapter)
+    videos = [a for a in assets if safe_str(a.get("type")) == "video"]
+    images = [a for a in assets if safe_str(a.get("type")) == "image"]
+
+    return {
+        "chapter_home_asset": chapter_home,
+        "video_assets": videos,
+        "image_assets": images,
+    }
 
 
 def build_signed_assets(prefixes: List[str]) -> List[Dict[str, Any]]:
@@ -1003,7 +1058,7 @@ def build_teaching_payload(
     ]
 
     assets = build_signed_assets([chapter_prefix] + part_prefixes)
-    asset_groups = split_assets(assets)
+    asset_groups = split_assets(assets, board, class_level, subject, book, chapter)
 
     return {
         "book": {
@@ -1023,7 +1078,7 @@ def build_teaching_payload(
             "id": chapter_row.get("id"),
             "title": chapter_row.get("title"),
             "chapter_order": chapter_row.get("chapter_order"),
-            "storage_bucket": chapter_row.get("storage_bucket"),
+            "storage_bucket": chapter_row.get("storage_bucket") or TEACHING_ASSETS_BUCKET,
             "storage_prefix": chapter_prefix,
             "publisher": chapter_row.get("publisher"),
         },
@@ -1395,6 +1450,31 @@ def get_storage_prefix_api(
     }
 
 
+@app.get("/api/chapter/home-image")
+def get_chapter_home_image(
+    board: str = Query(...),
+    class_level: int = Query(...),
+    subject: str = Query(...),
+    book: str = Query(...),
+    chapter: str = Query(...),
+):
+    bundle = build_teaching_payload(
+        board=board,
+        class_level=class_level,
+        subject=subject,
+        book=book,
+        chapter=chapter,
+    )
+
+    chapter_home_asset = bundle.get("chapter_home_asset")
+    return {
+        "found": bool(chapter_home_asset),
+        "bucket": TEACHING_ASSETS_BUCKET,
+        "path": safe_str(chapter_home_asset.get("path")) if chapter_home_asset else build_chapter_home_asset_path(board, class_level, subject, book, chapter),
+        "signed_url": safe_str(chapter_home_asset.get("signed_url")) if chapter_home_asset else "",
+    }
+
+
 @app.post("/api/chapter/bundle")
 def get_chapter_bundle(req: ChapterBundleRequest):
     return build_teaching_payload(
@@ -1431,6 +1511,7 @@ def start_session(req: StartSessionRequest):
 
     teacher_info = bundle.get("teacher", {}) or {}
     teacher_profile = teacher_info.get("profile", {}) or {}
+    teacher_avatar = teacher_info.get("avatar")
 
     session["teacher_name"] = safe_str(teacher_profile.get("teacher_name"))
     session["teacher_code"] = safe_str(teacher_profile.get("teacher_code"))
@@ -1452,7 +1533,12 @@ def start_session(req: StartSessionRequest):
         visible_teacher_text = f"{intro} Today we are studying {req.book} - {req.chapter}. {teaching}"
 
     output = build_teacher_output(session, visible_teacher_text)
-    session["history"].append({"role": "teacher", "text": output["teacher_text"], "speech_text": output["teacher_speech_text"], "ts": now_ts()})
+    session["history"].append({
+        "role": "teacher",
+        "text": output["teacher_text"],
+        "speech_text": output["teacher_speech_text"],
+        "ts": now_ts(),
+    })
 
     return {
         "session_id": session_id,
@@ -1475,6 +1561,7 @@ def start_session(req: StartSessionRequest):
             "base_language": session.get("teacher_base_language"),
             "accent_style": session.get("teacher_accent_style"),
         },
+        "teacher_avatar": teacher_avatar,
         "progress": {
             "current_chunk_index": session["current_chunk_index"],
             "current_chunk_id": current_chunk.get("id") if current_chunk else None,
@@ -1519,6 +1606,7 @@ def respond(req: StudentTurnRequest):
 
     teacher_info = bundle.get("teacher", {}) or {}
     teacher_profile = teacher_info.get("profile", {}) or {}
+    teacher_avatar = teacher_info.get("avatar")
     if teacher_profile:
         session["teacher_name"] = safe_str(teacher_profile.get("teacher_name"))
         session["teacher_code"] = safe_str(teacher_profile.get("teacher_code"))
@@ -1568,7 +1656,12 @@ def respond(req: StudentTurnRequest):
 
     current_chunk_after = get_current_chunk(chunks, session)
     output = build_teacher_output(session, visible_teacher_text)
-    session["history"].append({"role": "teacher", "text": output["teacher_text"], "speech_text": output["teacher_speech_text"], "ts": now_ts()})
+    session["history"].append({
+        "role": "teacher",
+        "text": output["teacher_text"],
+        "speech_text": output["teacher_speech_text"],
+        "ts": now_ts(),
+    })
 
     return {
         "session_id": session_id,
@@ -1581,6 +1674,7 @@ def respond(req: StudentTurnRequest):
             "base_language": session.get("teacher_base_language"),
             "accent_style": session.get("teacher_accent_style"),
         },
+        "teacher_avatar": teacher_avatar,
         "progress": {
             "current_chunk_index": session["current_chunk_index"],
             "current_chunk_id": current_chunk_after.get("id") if current_chunk_after else None,
